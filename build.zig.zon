@@ -1,0 +1,15 @@
+.{
+    .name = .dbuz,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{
+        .libxev = .{
+            .hash = "12207bbafd62d126bacad2444d9422fe51c9ac89aef662dbf66a228053722f27a0d6",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
