@@ -68,7 +68,7 @@ fn methodCallCallback(
 
     const arg0 = blk: {
         if (m.values) |v| {
-            break :blk v.values.items[0].inner.array.values.items;
+            break :blk v.values.items[0].inner.array.get(1).?.inner.@"struct".get(0).?.inner.string;
         } else unreachable;
     };
 
@@ -78,7 +78,7 @@ fn methodCallCallback(
     //     } else break :blk 0;
     // };
 
-    std.log.debug("method call received ({d}): {any}", .{arg0.len, arg0});
+    std.log.debug("method call received: {s}", .{arg0});
 
     msg.signature = "su"; // TODO: generate, track if allocated?
     msg.appendString(bus.allocator, .string, "HI") catch |err| {

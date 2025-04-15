@@ -500,10 +500,15 @@ pub const Message = struct {
                     }
                     break :blk .{ .array = values_ };
                 },
-                .@"struct", .dict_entry => blk: {
+                .@"struct" => blk: {
                     var values_ = Values.init(alloc);
                     n += try parseBytes(alloc, contained_sig.?, bytes_iter, &values_);
                     break :blk .{ .@"struct" = values_ };
+                },
+                .dict_entry => blk: {
+                    var values_ = Values.init(alloc);
+                    n += try parseBytes(alloc, contained_sig.?, bytes_iter, &values_);
+                    break :blk .{ .dict_entry = .{ values_.get(0).?, values_.get(1).? } };
                 },
                 // TODO
                 // .variant => unreachable,
@@ -1183,8 +1188,6 @@ const Values = struct {
             .dict_entry => |v| {
                 free(alloc, v[0]);
                 free(alloc, v[1]);
-                alloc.destroy(v[0]);
-                alloc.destroy(v[1]);
             },
             else => {},
         }
@@ -1204,7 +1207,7 @@ const Values = struct {
     /// Get a reference to the value at the given index,
     /// returns null if the index is out of bounds.
     pub fn get(self: *Values, index: usize) ?*Value {
-        if (index >= self.values.len) return null;
+        if (index >= self.values.items.len) return null;
         return &self.values.items[index];
     }
 
