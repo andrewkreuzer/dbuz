@@ -354,30 +354,30 @@ pub const Message = struct {
     }
 
     fn readString(type_: TypeSignature, field: *?[]const u8, iter: *BytesIterator) !void {
-        const v = iter.next(.variant) orelse return error.EOF;
+        const v = iter.next(.variant, null) orelse return error.EOF;
         const t: TypeSignature = @enumFromInt(v[0]);
         if (t != type_) {
             std.debug.print("invalid type: {any}\n", .{t});
             return error.InvalidField;
         }
 
-        const slice = iter.next(type_) orelse return error.EOF;
+        const slice = iter.next(type_, null) orelse return error.EOF;
         field.* = slice;
     }
 
     fn readIntU32(field: *?u32, iter: *BytesIterator) !void {
-        const v = iter.next(.variant) orelse return error.EOF;
+        const v = iter.next(.variant, null) orelse return error.EOF;
         if (@as(TypeSignature, @enumFromInt(v[0])) != .uint32)
             return error.InvalidField;
 
-        const slice = iter.next(.uint32) orelse return error.EOF;
+        const slice = iter.next(.uint32, null) orelse return error.EOF;
         field.* = mem.readInt(u32, slice[0..4], .little);
     }
 
     fn parseFields(self: *Self) !void {
         var bytes_iter: BytesIterator = .{ .buffer = self.fields_buf.? };
 
-        while (bytes_iter.next(.byte)) |t| {
+        while (bytes_iter.next(.byte, null)) |t| {
             const field_code: FieldCode = @enumFromInt(t[0]);
             try switch (field_code) {
                 .path => readString(.object_path, &self.path, &bytes_iter),
@@ -386,59 +386,138 @@ pub const Message = struct {
                 inline .interface, .member, .error_name, .destination, .sender
                     => |v| readString(.string, &@field(self, @tagName(v)), &bytes_iter),
 
-                    inline .reply_serial, .unix_fds
-                        => |v| readIntU32(&@field(self, @tagName(v)), &bytes_iter),
+                inline .reply_serial, .unix_fds
+                    => |v| readIntU32(&@field(self, @tagName(v)), &bytes_iter),
 
-                        else => return error.InvalidField,
-                    };
-            // TODO: hacky, read fields as actual structs
-            bytes_iter.index += TypeSignature.@"struct".alignOffset(bytes_iter.index);
+                else => return error.InvalidField,
+            };
+        // TODO: hacky, read fields as actual structs
+        bytes_iter.index += TypeSignature.@"struct".alignOffset(bytes_iter.index);
         }
     }
 
-    fn parseBody(self: *Self, alloc: Allocator, sig: ?[]const u8, slice: ?[]const u8) !void {
-        var sig_iter: SignatureIterator = .{ .buffer = sig orelse self.signature.? };
-        var bytes_iter: BytesIterator = .{ .buffer = slice orelse self.body_buf.? };
+    test "container signatures" {
+        const cases = [_]struct {
+            t: TypeSignature,
+            sig: []const u8,
+            expected: []const u8
+        }{
+            .{ .t = .array, .sig = "yaai", .expected = "y" },
+            .{ .t = .array, .sig = "ayuu", .expected = "ay" },
+            .{ .t = .array, .sig = "{ay}yy", .expected = "{ay}" },
+            .{ .t = .array, .sig = "{a{ay}}aay", .expected = "{a{ay}}" },
+            .{ .t = .array, .sig = "{a{a{ay}}}uu", .expected = "{a{a{ay}}}" },
+            .{ .t = .array, .sig = "{a{a{a{ay}}}}xx", .expected = "{a{a{a{ay}}}}" },
+            .{ .t = .@"struct", .sig = "sas)", .expected = "sas" },
+            .{ .t = .dict_entry, .sig = "sa}", .expected = "sa" },
+        };
+        for (cases) |c| {
+            var iter = SignatureIterator{ .buffer = c.sig };
+            const contained_sig = try readContainerSignature(c.t, &iter);
+            try std.testing.expectEqualSlices(u8, c.expected, contained_sig.?);
+        }
+    }
 
-        var values: Values = Values.init(alloc);
+    fn readContainerSignature(
+        T: TypeSignature,
+        iter: *SignatureIterator,
+    ) !?[]const u8 {
+        const start = iter.index;
+        var i: usize = 1;
+        var stack: [64]u8 = undefined;
+        switch (T) {
+            .@"struct" => stack[0] = ')',
+            .dict_entry => stack[0] = '}',
+            .array => i -= 1,
+            else => return null,
+        }
 
+        while (iter.next()) |c| {
+            const s = if (i > 0) stack[i-1] else 0;
+            switch (c) {
+                'a' => continue,
+                ')', '}' => |b| {
+                    if (s == b) i -= 1 else return error.InvalidSignature;
+                    if (i == 0 and (T == .@"struct" or T == .dict_entry)) {
+                        const end = iter.index-1;
+                        return iter.buffer[start..end];
+                    }
+                },
+                '(' => {
+                    if (i >= stack.len) return error.SignatureMaxDepth;
+                    stack[i] = ')';
+                    i += 1;
+                },
+                '{' => {
+                    if (i >= stack.len) return error.SignatureMaxDepth;
+                    stack[i] = '}';
+                    i += 1;
+                },
+                else => {}
+            }
+            if (i == 0) { const end = iter.index; return iter.buffer[start..end]; }
+        } else return error.InvalidSignature;
+    }
+
+    fn parseBytes(
+        alloc: Allocator,
+        signature: []const u8,
+        bytes_iter: *BytesIterator,
+        values: *Values,
+    ) !usize {
+        const start = bytes_iter.index;
+        var sig_iter: SignatureIterator = .{ .buffer = signature };
+
+        var n: usize = 0;
         while (sig_iter.next()) |t| {
             const T: TypeSignature = @enumFromInt(t);
-            const bytes = bytes_iter.next(T) orelse return error.InvalidBodySignature;
-
-            // TODO: use iter in readContainerType
-            const contained_sig = switch (T) {
-                .array, .@"struct", .dict_entry, .variant => try readContainerType(t, sig_iter.rest(), 0),
-                else => null,
-            };
-            if (contained_sig) |s| sig_iter.advance(s.len);
+            const contained_sig = try readContainerSignature(T, &sig_iter);
+            const conained_type: ?TypeSignature =
+                if (contained_sig) |sig| @enumFromInt(sig[0]) else null;
+            const b = bytes_iter.next(T, conained_type) orelse return error.InvalidBodySignature;
 
             const value: ValueUnion = switch (T) {
-                .byte => .{ .byte = bytes[0] },
-                .boolean => .{ .boolean = mem.readInt(u32, bytes[0..4], .little) == 1 },
-                .int16 => .{ .int16 = mem.readInt(i16, bytes[0..2], .little) },
-                .uint16 => .{ .uint16 = mem.readInt(u16, bytes[0..2], .little) },
-                .int32 => .{ .int32 = mem.readInt(i32, bytes[0..4], .little) },
-                .uint32 => .{ .uint32 = mem.readInt(u32, bytes[0..4], .little) },
-                .int64 => .{ .int64 = mem.readInt(i64, bytes[0..8], .little) },
-                .uint64 => .{ .uint64 = mem.readInt(u64, bytes[0..8], .little) },
-                .double => .{ .double = @as(f64, @bitCast(mem.readInt(u64, bytes[0..8], .little))) },
-                .string => .{ .string = bytes },
-                .object_path => .{ .object_path = bytes },
+                .byte => .{ .byte = b[0] },
+                .boolean => .{ .boolean = mem.readInt(u32, b[0..4], .little) == 1 },
+                .int16 => .{ .int16 = mem.readInt(i16, b[0..2], .little) },
+                .uint16 => .{ .uint16 = mem.readInt(u16, b[0..2], .little) },
+                .int32 => .{ .int32 = mem.readInt(i32, b[0..4], .little) },
+                .uint32 => .{ .uint32 = mem.readInt(u32, b[0..4], .little) },
+                .int64 => .{ .int64 = mem.readInt(i64, b[0..8], .little) },
+                .uint64 => .{ .uint64 = mem.readInt(u64, b[0..8], .little) },
+                .double => .{ .double = @as(f64, @bitCast(mem.readInt(u64, b[0..8], .little))) },
+                .string => .{ .string = b },
+                .object_path => .{ .object_path = b },
                 .signature => unreachable,
                 .array => blk: {
-                    var arr = ArrayList(ValueUnion).init(alloc);
-                    errdefer arr.deinit();
-                    try self.parseBody(alloc, contained_sig, bytes);
-                    break :blk .{ .array = try arr.toOwnedSlice() };
+                    var values_ = Values.init(alloc);
+                    var iter = BytesIterator{ .buffer = b };
+                    var n_: usize = 0;
+                    var i: usize = 0;
+                    while (n_ < b.len) {
+                        n_ += try parseBytes(alloc, contained_sig.?, &iter, &values_);
+                        i += 1;
+                    }
+                    break :blk .{ .array = values_ };
+                },
+                .@"struct", .dict_entry => blk: {
+                    var values_ = Values.init(alloc);
+                    n += try parseBytes(alloc, contained_sig.?, bytes_iter, &values_);
+                    break :blk .{ .@"struct" = values_ };
                 },
                 // TODO
-                // .@"struct", .dict_entry, .variant => unreachable,
+                // .variant => unreachable,
                 else => return error.InvalidType,
             };
-            try values.append(.{ .type = T, .contained_sig = contained_sig, .slice = bytes, .inner = value });
+            try values.append(.{ .type = T, .contained_sig = contained_sig, .slice = b, .inner = value });
         }
-        self.values = values;
+        return bytes_iter.index - start;
+    }
+
+    fn parseBody( self: *Self, alloc: Allocator) !void {
+        self.values = Values.init(alloc);
+        var bytes_iter: BytesIterator = .{ .buffer = self.body_buf.? };
+        _ = try parseBytes(alloc, self.signature.?, &bytes_iter, &self.values.?);
     }
 
     pub fn decode(alloc: Allocator, reader: anytype) !Self {
@@ -447,17 +526,22 @@ pub const Message = struct {
 
         message.fields_buf = try alloc.alloc(u8, message.header.fields_len);
         errdefer alloc.free(message.fields_buf.?);
+
         var n = try reader.readAll(message.fields_buf.?);
         if (n != message.header.fields_len) return error.InvalidFields;
         try message.parseFields();
 
-        if (message.header.body_len == 0 and message.signature == null)
-            return message;
+        if (message.header.body_len == 0
+            and message.signature == null
+        ) return message;
 
-        if (message.header.body_len == 0 and message.signature != null)
-            return error.InvalidBody;
-        if (message.header.body_len > 0 and message.signature == null)
-            return error.InvalidSignature;
+        if (message.header.body_len == 0
+            and message.signature != null
+        ) return error.InvalidBody;
+
+        if (message.header.body_len > 0
+            and message.signature == null
+        ) return error.InvalidSignature;
 
         // align to the start of the body
         // and confirm padding bytes are zero
@@ -469,7 +553,7 @@ pub const Message = struct {
         errdefer alloc.free(message.body_buf.?);
         n = try reader.readAll(message.body_buf.?);
         if (n != message.header.body_len) return error.InvalidBody;
-        try message.parseBody(alloc, null, null);
+        try message.parseBody(alloc);
 
         return message;
     }
@@ -676,7 +760,6 @@ test "encode method return" {
 }
 
 test "decode" {
-    const alloc = std.testing.allocator;
     const cases = [_]struct {
         name: []const u8,
         msg_type: MessageType,
@@ -782,6 +865,7 @@ test "decode" {
             }
         },
     };
+    const alloc = std.testing.allocator;
     for (cases) |case| {
         var fbs = std.io.fixedBufferStream(case.bytes);
         const reader = fbs.reader();
@@ -797,24 +881,99 @@ test "decode" {
         if (case.signature) |sig| try std.testing.expectEqualStrings(sig, msg.signature.?);
         if (case.sender) |sender| try std.testing.expectEqualStrings(sender, msg.sender.?);
         if (case.body) |body| try std.testing.expectEqualSlices(u8, body, msg.body_buf.?);
+    }
+}
 
-        // if (case.body) |_| {
-        //     for (msg.values.?.values.items) |value| {
-        //         const inner = value.inner;
-        //         const t = std.meta.activeTag(inner);
-        //         switch (t) {
-        //             .string => {
-        //                 std.debug.print("value: {s}\n", .{inner.string});
-        //             },
-        //             .uint32 => {
-        //                 std.debug.print("value: {d}\n", .{inner.uint32});
-        //             },
-        //             else => {
-        //                 std.debug.print("value: {any}\n", .{inner});
-        //             }
-        //         }
-        //     }
-        // }
+test "array" {
+    const cases = [_]struct {
+        name: []const u8,
+        msg_type: MessageType,
+        path: ?[]const u8 = null,
+        interface: ?[]const u8 = null,
+        member: ?[]const u8 = null,
+        destination: ?[]const u8 = null,
+        reply_serial: ?u32 = null,
+        signature: ?[]const u8 = null,
+        sender: ?[]const u8 = null,
+        values: ?[]const Value = null,
+        body: ?[]const u8 = null,
+        bytes: []const u8,
+    }{
+        .{
+            .name = "Notify",
+            .msg_type = .method_call,
+            .path = "/net/anunknownalias/Dbuz",
+            .destination = "net.anunknownalias.Dbuz",
+            .interface = "net.anunknownalias.Dbuz",
+            .member = "Notify",
+            .signature = "as",
+            .sender = ":1.51",
+            .values = &[_]Value{
+                .{
+                    .type = .string,
+                    .contained_sig = "s",
+                    .slice = &[_]u8{0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x00},
+                    .inner = .{ .string = &[_]u8{0x74, 0x65, 0x73, 0x74} }
+                },
+                .{
+                    .type = .string,
+                    .contained_sig = "s",
+                    .slice = &[_]u8{0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x32, 0x00},
+                    .inner = .{ .string = &[_]u8{0x74, 0x65, 0x73, 0x74, 0x32} }
+                },
+                .{
+                    .type = .string,
+                    .contained_sig = "s",
+                    .slice = &[_]u8{0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x33, 0x00},
+                    .inner = .{ .string = &[_]u8{0x74, 0x65, 0x73, 0x74, 0x33} }
+                }
+            },
+            .body = &[_]u8{
+                0x22, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, 0x00, 0x00,
+                0x05, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x32, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+                0x74, 0x65, 0x73, 0x74, 0x33, 0x00
+
+            },
+            .bytes = &[_]u8{
+                0x6c, 0x01, 0x04, 0x01, 0x26, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x8e, 0x00, 0x00, 0x00,
+                0x01, 0x01, 0x6f, 0x00, 0x18, 0x00, 0x00, 0x00, 0x2f, 0x6e, 0x65, 0x74, 0x2f, 0x61, 0x6e, 0x75,
+                0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x61, 0x6c, 0x69, 0x61, 0x73, 0x2f, 0x44, 0x62, 0x75, 0x7a,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x73, 0x00, 0x06, 0x00, 0x00, 0x00,
+                0x4e, 0x6f, 0x74, 0x69, 0x66, 0x79, 0x00, 0x00, 0x02, 0x01, 0x73, 0x00, 0x17, 0x00, 0x00, 0x00,
+                0x6e, 0x65, 0x74, 0x2e, 0x61, 0x6e, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x61, 0x6c, 0x69,
+                0x61, 0x73, 0x2e, 0x44, 0x62, 0x75, 0x7a, 0x00, 0x06, 0x01, 0x73, 0x00, 0x17, 0x00, 0x00, 0x00,
+                0x6e, 0x65, 0x74, 0x2e, 0x61, 0x6e, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x61, 0x6c, 0x69,
+                0x61, 0x73, 0x2e, 0x44, 0x62, 0x75, 0x7a, 0x00, 0x08, 0x01, 0x67, 0x00, 0x02, 0x61, 0x73, 0x00,
+                0x07, 0x01, 0x73, 0x00, 0x05, 0x00, 0x00, 0x00, 0x3a, 0x31, 0x2e, 0x35, 0x31, 0x00, 0x00, 0x00,
+                0x22, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, 0x00, 0x00,
+                0x05, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x32, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+                0x74, 0x65, 0x73, 0x74, 0x33, 0x00
+            }
+        },
+    };
+    const alloc = std.testing.allocator;
+    for (cases) |case| {
+        var fbs = std.io.fixedBufferStream(case.bytes);
+        const reader = fbs.reader();
+        var msg = try Message.decode(alloc, reader);
+        defer msg.deinit(alloc);
+
+        try std.testing.expectEqual(msg.header.msg_type, case.msg_type);
+        if (case.path) |path| try std.testing.expectEqualStrings(path, msg.path.?);
+        if (case.interface) |iface| try std.testing.expectEqualStrings(iface, msg.interface.?);
+        if (case.member) |member| try std.testing.expectEqualStrings(member, msg.member.?);
+        if (case.destination) |dest| try std.testing.expectEqualStrings(dest, msg.destination.?);
+        if (case.reply_serial) |serial| try std.testing.expectEqual(serial, msg.reply_serial);
+        if (case.signature) |sig| try std.testing.expectEqualStrings(sig, msg.signature.?);
+        if (case.sender) |sender| try std.testing.expectEqualStrings(sender, msg.sender.?);
+        if (case.body) |body| try std.testing.expectEqualSlices(u8, body, msg.body_buf.?);
+        const arr = msg.values.?.values.items[0].inner.array;
+        try std.testing.expectEqual(case.values.?[0..].len, arr.values.items.len);
+        for (arr.values.items, 0..) |value, i| {
+            const expect = case.values.?[i];
+            try std.testing.expect(value.type == expect.type);
+            try std.testing.expectEqualSlices(u8, value.inner.string, expect.inner.string);
+        }
     }
 }
 
@@ -861,15 +1020,19 @@ const BytesIterator = struct {
     index: usize = 0,
     const Self = @This();
 
-    fn next(self: *Self, T: TypeSignature) ?[]const u8 {
-        const result, const n = self.peek(T) orelse return null;
+    fn pos(self: *Self) usize {
+        return self.index;
+    }
+
+    fn next(self: *Self, T: TypeSignature, t: ?TypeSignature) ?[]const u8 {
+        const result, const n = self.peek(T, t) orelse return null;
         self.index += n;
         return result;
     }
 
-    fn peek(self: *Self, T: TypeSignature) ?struct{ []const u8, usize } {
+    fn peek(self: *Self, T: TypeSignature, t: ?TypeSignature) ?struct{ []const u8, usize } {
         const offset = T.alignOffset(self.index);
-        const alignment = self.index + offset;
+        var alignment = self.index + offset;
         if (alignment >= self.buffer.len) return null;
 
         return switch (T) {
@@ -932,26 +1095,14 @@ const BytesIterator = struct {
             },
             .array => blk: {
                 const slice = self.buffer[alignment..][0..@sizeOf(u32)];
-                const len = mem.readInt(u32, slice, .little) + 1;
-                // TODO: padding to contained type
+                const len = mem.readInt(u32, slice, .little);
+                const offset_ = t.?.alignOffset(alignment + @sizeOf(u32));
+                alignment += offset_;
                 const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
-                const n = offset + len + @sizeOf(u32) + 1;
+                const n = offset + offset_ + len + @sizeOf(u32) + 1;
                 break :blk .{ ret, n };
             },
-            .@"struct" => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u32)];
-                const len = mem.readInt(u32, slice, .little) + 1;
-                const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
-                const n = offset + len + @sizeOf(u32) + 1;
-                break :blk .{ ret, n };
-            },
-            .dict_entry => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u32)];
-                const len = mem.readInt(u32, slice, .little) + 1;
-                const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
-                const n = offset + len + @sizeOf(u32) + 1;
-                break :blk .{ ret, n };
-            },
+            .@"struct", .dict_entry  => .{ self.buffer[alignment..], offset },
             else =>  null,
         };
     }
@@ -983,82 +1134,6 @@ const SignatureIterator = struct {
     }
 };
 
-fn contains(b: u8, s: []const u8) bool {
-    for (s) |c| if (b == c) return true;
-    return false;
-}
-
-fn readContainerType(t: u8, sig: []const u8, stack_size: u8) ![]const u8 {
-    if (stack_size == 64) return error.MaxDepthExceeded;
-    if (!contains(sig[0], "a({")) return sig[0..1];
-
-    var i: u8 = 0;
-    var j: usize = 0;
-    var stack: [64]u8 = undefined;
-
-    if (t == '(') {
-        stack[i] = ')';
-        i += 1;
-    }
-
-    if (t == '{') {
-        stack[i] = '}';
-        i += 1;
-    }
-
-    while (j < sig.len) {
-        switch (sig[j]) {
-            'a' => {
-                const arr_type = try readContainerType('a', sig[j + 1 ..], stack_size + i);
-                j += arr_type.len;
-            },
-            '(' => {
-                if (i > stack.len) return error.MaxDepthExceeded;
-                stack[i] = ')';
-                i += 1;
-            },
-            ')' => {
-                if (stack[i - 1] == sig[j]) {
-                    i -= 1;
-                } else return error.InvalidSignature;
-            },
-            '{' => {
-                if (i > stack.len) return error.MaxDepthExceeded;
-                stack[i] = '}';
-                i += 1;
-            },
-            '}' => {
-                if (stack[i - 1] == sig[j]) {
-                    i -= 1;
-                } else return error.InvalidSignature;
-            },
-            else => {},
-        }
-        j += 1;
-        if (i == 0) return sig[0..j];
-    }
-
-    return error.InvalidSignature;
-}
-
-test "array types" {
-    const cases = [_]struct {
-        sig: []const u8,
-        expected: []const u8
-    }{
-        .{ .sig = "yaai", .expected = "y" },
-        .{ .sig = "ayuu", .expected = "ay" },
-        .{ .sig = "{ay}yy", .expected = "{ay}" },
-        .{ .sig = "{a{ay}}aay", .expected = "{a{ay}}" },
-        .{ .sig = "{a{a{ay}}}uu", .expected = "{a{a{ay}}}" },
-        .{ .sig = "{a{a{a{ay}}}}xx", .expected = "{a{a{a{ay}}}}" }
-    };
-    for (cases) |c| {
-        const arr_type = try readContainerType('a', c.sig, 0);
-        try std.testing.expectEqualSlices(u8, c.expected, arr_type);
-    }
-}
-
 const ValueUnion = union(enum) {
     byte: u8,
     boolean: bool,
@@ -1072,10 +1147,10 @@ const ValueUnion = union(enum) {
     string: []const u8,
     object_path: []const u8,
     signature: []const u8,
-    array: []ValueUnion,
-    @"struct": []ValueUnion,
-    variant: struct{[]const u8, *ValueUnion},
-    dict_entry: struct{*ValueUnion, *ValueUnion},
+    array: Values,
+    @"struct": Values,
+    variant: struct{[]const u8, *Value},
+    dict_entry: struct{*Value, *Value},
 };
 
 pub const Value = struct {
@@ -1096,11 +1171,10 @@ const Values = struct {
         };
     }
 
-    fn free(alloc: Allocator, value: *ValueUnion) void {
-        switch (value.*) {
-            .array, .@"struct" => |val| {
-                for (val) |*v| free(alloc, v);
-                alloc.free(val);
+    fn free(alloc: Allocator, value: *Value) void {
+        switch (value.*.inner) {
+            .array, .@"struct" => |*val| {
+                val.deinit(alloc);
             },
             .variant => |v| {
                 free(alloc, v[1]);
@@ -1118,7 +1192,7 @@ const Values = struct {
 
     pub fn deinit(self: *Values, alloc: Allocator) void {
         for (self.values.items) |*value| {
-            free(alloc, &value.inner);
+            free(alloc, value);
             // TODO: don't want to have to allocate these
             // when generating the message
             // alloc.free(value.contained_sig);
@@ -1152,14 +1226,14 @@ const Values = struct {
     }
 };
 
-fn nest(alloc: Allocator, depth: u8) []ValueUnion {
+fn nest(alloc: Allocator, depth: u8) Values {
     if (depth == 0) return blk: {
-        const v = alloc.alloc(ValueUnion, 1) catch unreachable;
-        v[0] = .{ .byte = 1 };
+        var v = Values.init(alloc);
+        v.append(.{ .type = .byte, .inner = .{ .byte = 1 }}) catch unreachable;
         break :blk v;
     };
-    const v = alloc.alloc(ValueUnion, 1) catch unreachable;
-    v[0] = .{ .array = nest(alloc, depth - 1) };
+    var v = Values.init(alloc);
+    v.append(.{ .type = .array, .inner = .{ .array = nest(alloc, depth - 1) } }) catch unreachable;
     return v;
 }
 
@@ -1169,7 +1243,7 @@ test "values arrays" {
     try values.append(.{
         .type = .array,
         .inner = .{ .array = nest(alloc, 10) },
-        .contained_sig = null,
+        .contained_sig = "aaaaaaaaaaay",
         .slice = &[_]u8{}
     });
     values.deinit(alloc);

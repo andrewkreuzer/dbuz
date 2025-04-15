@@ -264,32 +264,18 @@ pub const Dbus = struct {
         return .disarm;
     }
 
-    fn requestNameMsg(bus: *Dbus, name: []const u8) ![]const u8 {
-        var fbs = std.io.fixedBufferStream(&bus.write_buf);
-        const writer = fbs.writer();
-
+    pub fn requestName(bus: *Dbus, name: []const u8) !void {
         var msg = message.RequestName;
-        defer msg.deinit(bus.allocator);
-
         try msg.appendString(bus.allocator, .string, name);
         try msg.appendInt(bus.allocator, .uint32, 1);
-        try msg.encode(bus.allocator, writer);
+        defer msg.deinit(bus.allocator);
 
-        return fbs.getWritten();
-    }
-
-    pub fn requestName(bus: *Dbus, name: []const u8) !void {
         var c: xev.Completion = undefined;
-        const msg = bus.requestNameMsg(name) catch |err| {
-            std.log.err("failed to build requestName message: {any}", .{err});
-            return err;
-        };
-
-        bus.write(msg, &c, null);
+        try bus.writeMsg(&msg, &c);
         try bus.loop.run(.until_done);
     }
 
-    pub fn writeMsg(bus: *Dbus, msg: *Message) !void {
+    pub fn writeMsg(bus: *Dbus, msg: *Message, c: ?*xev.Completion) !void {
         var fbs = std.io.fixedBufferStream(&bus.write_buf);
         const writer = fbs.writer();
 
@@ -297,7 +283,7 @@ pub const Dbus = struct {
         defer msg.deinit(bus.allocator);
 
         const bytes = fbs.getWritten();
-        bus.write(bytes, null, null);
+        bus.write(bytes, c, null);
     }
 
     fn decodeMsg(bus: *Dbus, reader: anytype) !Message {

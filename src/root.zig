@@ -61,24 +61,24 @@ fn methodCallCallback(
     });
 
     if (mem.eql(u8, m.member.?, "Shutdown")) {
-        bus.writeMsg(&msg) catch unreachable;
+        bus.writeMsg(&msg, null) catch unreachable;
         bus.shutdown();
         return;
     }
 
     const arg0 = blk: {
         if (m.values) |v| {
-            break :blk v.values.items[0].inner.string;
-        } else break :blk "none";
+            break :blk v.values.items[0].inner.array.values.items;
+        } else unreachable;
     };
 
-    const arg1 = blk: {
-        if (m.values) |v| {
-            break :blk v.values.items[1].inner.uint32;
-        } else break :blk 0;
-    };
+    // const arg1 = blk: {
+    //     if (m.values) |v| {
+    //         break :blk v.values.items[1].inner.uint32;
+    //     } else break :blk 0;
+    // };
 
-    std.log.debug("method call received: {s}, {d}", .{arg0, arg1});
+    std.log.debug("method call received ({d}): {any}", .{arg0.len, arg0});
 
     msg.signature = "su"; // TODO: generate, track if allocated?
     msg.appendString(bus.allocator, .string, "HI") catch |err| {
@@ -90,7 +90,7 @@ fn methodCallCallback(
         return;
     };
 
-    bus.writeMsg(&msg) catch {
+    bus.writeMsg(&msg, null) catch {
         std.log.debug("failed to write message", .{});
     };
 }

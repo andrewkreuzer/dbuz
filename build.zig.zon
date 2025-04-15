@@ -1,9 +1,11 @@
 .{
     .name = .dbuz,
     .version = "0.0.0",
+    .fingerprint = 0x3ccbb597a3c8b498,
     .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .libxev = .{
+            .url = "https://github.com/mitchellh/libxev/archive/refs/heads/main.tar.gz",
             .hash = "12207bbafd62d126bacad2444d9422fe51c9ac89aef662dbf66a228053722f27a0d6",
         },
     },
