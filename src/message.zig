@@ -5,7 +5,12 @@ const mem = std.mem;
 const meta = std.meta;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
-const AutoHashMap = std.AutoHashMap;
+
+const types = @import("types.zig");
+const Value = types.Value;
+const Values = types.Values;
+const ValueUnion = types.ValueUnion;
+const TypeSignature = types.TypeSignature;
 
 pub const Hello = Message.init(.{
     .msg_type = .method_call,
@@ -118,9 +123,9 @@ pub const Message = struct {
     ) !void {
         var values = self.values orelse Values.init(alloc);
         const v: Value = switch (T) {
-            .string => .{ .type = T, .inner = .{ .string = value }},
-            .object_path => .{ .type = T, .inner = .{ .object_path = value }},
-            .signature => .{ .type = T, .inner = .{ .signature = value }},
+            .string => .{ .type = T, .inner = .{ .string = .{ .inner = value } } },
+            .object_path => .{ .type = T, .inner = .{ .object_path = .{ .inner = value } } },
+            .signature => .{ .type = T, .inner = .{ .signature = .{ .inner = value } } },
             else => return error.InvalidStringType,
         };
         try values.append(v);
@@ -324,16 +329,16 @@ pub const Message = struct {
                         i += @sizeOf(f64);
                     },
                     .string => {
-                        try buf_writer.writeInt(u32, @as(u32, @intCast(value.inner.string.len)), .little);
-                        try buf_writer.writeAll(value.inner.string);
+                        try buf_writer.writeInt(u32, @as(u32, @intCast(value.inner.string.inner.len)), .little);
+                        try buf_writer.writeAll(value.inner.string.inner);
                         try buf_writer.writeByte(0x00);
-                        i += @sizeOf(u32) + value.inner.string.len + 1;
+                        i += @sizeOf(u32) + value.inner.string.inner.len + 1;
                     },
                     .object_path => {
-                        try buf_writer.writeInt(u32, @as(u32, @intCast(value.inner.object_path.len)), .little);
-                        try buf_writer.writeAll(value.inner.object_path);
+                        try buf_writer.writeInt(u32, @as(u32, @intCast(value.inner.object_path.inner.len)), .little);
+                        try buf_writer.writeAll(value.inner.object_path.inner);
                         try buf_writer.writeByte(0x00);
-                        i += @sizeOf(u32) + value.inner.object_path.len + 1;
+                        i += @sizeOf(u32) + value.inner.object_path.inner.len + 1;
                     },
                     // TODO:
                     // .signature, array, .@"struct", .dict_entry, .variant, .unix_fd
@@ -468,7 +473,6 @@ pub const Message = struct {
         const start = bytes_iter.index;
         var sig_iter: SignatureIterator = .{ .buffer = signature };
 
-        var n: usize = 0;
         while (sig_iter.next()) |t| {
             const T: TypeSignature = @enumFromInt(t);
             const contained_sig = try readContainerSignature(T, &sig_iter);
@@ -486,9 +490,8 @@ pub const Message = struct {
                 .int64 => .{ .int64 = mem.readInt(i64, b[0..8], .little) },
                 .uint64 => .{ .uint64 = mem.readInt(u64, b[0..8], .little) },
                 .double => .{ .double = @as(f64, @bitCast(mem.readInt(u64, b[0..8], .little))) },
-                .string => .{ .string = b },
-                .object_path => .{ .object_path = b },
-                .signature => unreachable,
+                .string => .{ .string = .{ .inner = b } },
+                .object_path => .{ .object_path = .{ .inner = b } },
                 .array => blk: {
                     var values_ = Values.init(alloc);
                     var iter = BytesIterator{ .buffer = b };
@@ -502,16 +505,18 @@ pub const Message = struct {
                 },
                 .@"struct" => blk: {
                     var values_ = Values.init(alloc);
-                    n += try parseBytes(alloc, contained_sig.?, bytes_iter, &values_);
+                    _ = try parseBytes(alloc, contained_sig.?, bytes_iter, &values_);
                     break :blk .{ .@"struct" = values_ };
                 },
                 .dict_entry => blk: {
                     var values_ = Values.init(alloc);
-                    n += try parseBytes(alloc, contained_sig.?, bytes_iter, &values_);
-                    break :blk .{ .dict_entry = .{ values_.get(0).?, values_.get(1).? } };
+                    _ = try parseBytes(alloc, contained_sig.?, bytes_iter, &values_);
+                    assert(values_.len() == 2);
+                    break :blk .{ .dict_entry = values_ };
                 },
                 // TODO
                 // .variant => unreachable,
+                // .signature => unreachable,
                 else => return error.InvalidType,
             };
             try values.append(.{ .type = T, .contained_sig = contained_sig, .slice = b, .inner = value });
@@ -618,7 +623,127 @@ const FieldCode = enum(u8) {
     unix_fds = 9,
 };
 
+const BytesIterator = struct {
+    buffer: []const u8,
+    index: usize = 0,
+    const Self = @This();
+
+    fn pos(self: *Self) usize {
+        return self.index;
+    }
+
+    fn next(self: *Self, T: TypeSignature, t: ?TypeSignature) ?[]const u8 {
+        const result, const n = self.peek(T, t) orelse return null;
+        self.index += n;
+        return result;
+    }
+
+    fn peek(self: *Self, T: TypeSignature, t: ?TypeSignature) ?struct{ []const u8, usize } {
+        const offset = T.alignOffset(self.index);
+        var alignment = self.index + offset;
+        if (alignment >= self.buffer.len) return null;
+
+        return switch (T) {
+            .byte => .{
+                self.buffer[alignment..][0..@sizeOf(u8)],
+                offset + @sizeOf(u8)
+            },
+            .boolean => .{
+                self.buffer[alignment..][0..@sizeOf(u32)],
+                offset + @sizeOf(u32)
+            },
+            .int16 => .{
+                self.buffer[alignment..][0..@sizeOf(i16)],
+                offset + @sizeOf(i16)
+            },
+            .uint16 => .{
+                self.buffer[alignment..][0..@sizeOf(u16)],
+                offset + @sizeOf(u16)
+            },
+            .int32 => .{
+                self.buffer[alignment..][0..@sizeOf(i32)],
+                offset + @sizeOf(i32)
+            },
+            .uint32 => .{
+                self.buffer[alignment..][0..@sizeOf(u32)],
+                offset + @sizeOf(u32)
+            },
+            .int64 => .{
+                self.buffer[alignment..][0..@sizeOf(i64)],
+                offset + @sizeOf(i64)
+            },
+            .uint64 => .{
+                self.buffer[alignment..][0..@sizeOf(u64)],
+                offset + @sizeOf(u64)
+            },
+            .double => .{
+                self.buffer[alignment..][0..@sizeOf(f64)],
+                offset + @sizeOf(f64)
+            },
+            .signature => blk: {
+                const slice = self.buffer[alignment..][0..@sizeOf(u8)];
+                const len = mem.readInt(u8, slice, .little);
+                const ret = self.buffer[alignment+@sizeOf(u8)..][0..len];
+                const n = offset + len + @sizeOf(u8) + 1; // 1 for null byte
+                break :blk .{ ret, n };
+            },
+            .variant => blk: {
+                const slice = self.buffer[alignment..][0..@sizeOf(u8)];
+                const len = mem.readInt(u8, slice, .little);
+                const ret = self.buffer[alignment+@sizeOf(u8)..][0..len];
+                const n = offset + len + @sizeOf(u8) + 1; // 1 for null byte
+                break :blk .{ ret, n }; // 1 for null byte
+            },
+            .object_path, .string => blk: {
+                const slice = self.buffer[alignment..][0..@sizeOf(u32)];
+                const len = mem.readInt(u32, slice, .little);
+                const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
+                const n = offset + len + @sizeOf(u32) + 1;
+                break :blk .{ ret, n }; // 1 for null byte
+            },
+            .array => blk: {
+                const slice = self.buffer[alignment..][0..@sizeOf(u32)];
+                const len = mem.readInt(u32, slice, .little);
+                const offset_ = t.?.alignOffset(alignment + @sizeOf(u32));
+                alignment += offset_;
+                const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
+                const n = offset + offset_ + len + @sizeOf(u32) + 1;
+                break :blk .{ ret, n };
+            },
+            .@"struct", .dict_entry  => .{ self.buffer[alignment..], offset },
+            else =>  null,
+        };
+    }
+};
+
+const SignatureIterator = struct {
+    buffer: []const u8,
+    index: usize = 0,
+
+    const Self = @This();
+
+    fn next(self: *Self) ?u8 {
+        const result = self.peek() orelse return null;
+        self.index += 1;
+        return result;
+    }
+
+    fn peek(self: *Self) ?u8 {
+        if (self.index >= self.buffer.len) return null;
+        return self.buffer[self.index];
+    }
+
+    fn rest(self: *Self) []const u8 {
+        return self.buffer[self.index..];
+    }
+
+    fn advance(self: *Self, n: usize) void {
+        self.index += n;
+    }
+};
+
 test "encode method call" {
+    const String = @import("types.zig").String;
     const cases = [_]struct {
         opts: MsgOptions,
         values: ?[]const Value = null,
@@ -667,8 +792,10 @@ test "encode method call" {
                         0x74, 0x42, 0x75, 0x73, 0x00
                     },
                     .inner = .{
-                        .string = &[_]u8{
-                            0x63, 0x6f, 0x6d, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x2e, 0x54, 0x65, 0x73, 0x74, 0x42, 0x75, 0x73
+                        .string = String{
+                            .inner = &[_]u8{
+                                0x63, 0x6f, 0x6d, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x2e, 0x54, 0x65, 0x73, 0x74, 0x42, 0x75, 0x73
+                            }
                         }
                     }
                 },
@@ -714,6 +841,7 @@ test "encode method call" {
 }
 
 test "encode method return" {
+    const String = @import("types.zig").String;
     const alloc = std.testing.allocator;
     const cases = [_]struct {
         opts: MsgOptions,
@@ -734,7 +862,7 @@ test "encode method return" {
                     .type = .string,
                     .contained_sig = null,
                     .slice = &[_]u8{0x07, 0x00, 0x00, 0x00, 0x3a, 0x31, 0x2e, 0x31, 0x39, 0x39, 0x33, 0x00},
-                    .inner = .{ .string = &[_]u8{0x3a, 0x31, 0x2e, 0x31, 0x39, 0x39, 0x33} }
+                    .inner = .{ .string = String{ .inner = &[_]u8{0x3a, 0x31, 0x2e, 0x31, 0x39, 0x39, 0x33} } }
                 }
             },
             .expected = &[_]u8{
@@ -869,6 +997,51 @@ test "decode" {
                 0x6e, 0x61, 0x6c, 0x69, 0x61, 0x73, 0x2e, 0x44, 0x42, 0x75, 0x7a, 0x00, 0x01, 0x00, 0x00, 0x00
             }
         },
+        .{
+            .name = "Notify",
+            .msg_type = .method_call,
+            .path = "/net/anunknownalias/Dbuz",
+            .interface = "net.anunknownalias.Dbuz",
+            .member = "Notify",
+            .signature = "a(sas)sa{ss}",
+            .body = &[_]u8{
+                0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x79, 0x61, 0x79, 0x61,
+                0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74,
+                0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x32, 0x00, 0x00, 0x00,
+                0x05, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00, 0x6e, 0x61, 0x6e, 0x61, 0x00, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00, 0x74, 0x61, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+                0x74, 0x61, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x63, 0x68, 0x61, 0x63,
+                0x68, 0x61, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x72, 0x61, 0x72, 0x61,
+                0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x77, 0x6f, 0x77, 0x6f, 0x77, 0x00, 0x00, 0x00,
+                0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x77, 0x65, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00, 0x77, 0x68, 0x6f, 0x6f, 0x00,
+            },
+            .bytes = &[_]u8{
+                0x6c, 0x01, 0x04, 0x01, 0xa9, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x9f, 0x00, 0x00, 0x00,
+                0x01, 0x01, 0x6f, 0x00, 0x18, 0x00, 0x00, 0x00, 0x2f, 0x6e, 0x65, 0x74, 0x2f, 0x61, 0x6e, 0x75,
+                0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x61, 0x6c, 0x69, 0x61, 0x73, 0x2f, 0x44, 0x62, 0x75, 0x7a,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x01, 0x73, 0x00, 0x06, 0x00, 0x00, 0x00,
+                0x4e, 0x6f, 0x74, 0x69, 0x66, 0x79, 0x00, 0x00, 0x02, 0x01, 0x73, 0x00, 0x17, 0x00, 0x00, 0x00,
+                0x6e, 0x65, 0x74, 0x2e, 0x61, 0x6e, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x61, 0x6c, 0x69,
+                0x61, 0x73, 0x2e, 0x44, 0x62, 0x75, 0x7a, 0x00, 0x06, 0x01, 0x73, 0x00, 0x17, 0x00, 0x00, 0x00,
+                0x6e, 0x65, 0x74, 0x2e, 0x61, 0x6e, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, 0x61, 0x6c, 0x69,
+                0x61, 0x73, 0x2e, 0x44, 0x62, 0x75, 0x7a, 0x00, 0x08, 0x01, 0x67, 0x00, 0x0c, 0x61, 0x28, 0x73,
+                0x61, 0x73, 0x29, 0x73, 0x61, 0x7b, 0x73, 0x73, 0x7d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x07, 0x01, 0x73, 0x00, 0x06, 0x00, 0x00, 0x00, 0x3a, 0x31, 0x2e, 0x36, 0x35, 0x38, 0x00, 0x00,
+                0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x79, 0x61, 0x79, 0x61,
+                0x00, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74,
+                0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x32, 0x00, 0x00, 0x00,
+                0x05, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00, 0x6e, 0x61, 0x6e, 0x61, 0x00, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00, 0x74, 0x61, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+                0x74, 0x61, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x63, 0x68, 0x61, 0x63,
+                0x68, 0x61, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x72, 0x61, 0x72, 0x61,
+                0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x77, 0x6f, 0x77, 0x6f, 0x77, 0x00, 0x00, 0x00,
+                0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x77, 0x65, 0x00, 0x00,
+                0x04, 0x00, 0x00, 0x00, 0x77, 0x68, 0x6f, 0x6f, 0x00,
+            }
+        },
     };
     const alloc = std.testing.allocator;
     for (cases) |case| {
@@ -890,6 +1063,7 @@ test "decode" {
 }
 
 test "array" {
+    const String = @import("types.zig").String;
     const cases = [_]struct {
         name: []const u8,
         msg_type: MessageType,
@@ -918,19 +1092,19 @@ test "array" {
                     .type = .string,
                     .contained_sig = "s",
                     .slice = &[_]u8{0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x00},
-                    .inner = .{ .string = &[_]u8{0x74, 0x65, 0x73, 0x74} }
+                    .inner = .{ .string = String{ .inner = &[_]u8{0x74, 0x65, 0x73, 0x74} } }
                 },
                 .{
                     .type = .string,
                     .contained_sig = "s",
                     .slice = &[_]u8{0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x32, 0x00},
-                    .inner = .{ .string = &[_]u8{0x74, 0x65, 0x73, 0x74, 0x32} }
+                    .inner = .{ .string = String{ .inner = &[_]u8{0x74, 0x65, 0x73, 0x74, 0x32} } }
                 },
                 .{
                     .type = .string,
                     .contained_sig = "s",
                     .slice = &[_]u8{0x04, 0x00, 0x00, 0x00, 0x74, 0x65, 0x73, 0x74, 0x33, 0x00},
-                    .inner = .{ .string = &[_]u8{0x74, 0x65, 0x73, 0x74, 0x33} }
+                    .inner = .{ .string = String{ .inner = &[_]u8{0x74, 0x65, 0x73, 0x74, 0x33} } }
                 }
             },
             .body = &[_]u8{
@@ -977,277 +1151,8 @@ test "array" {
         for (arr.values.items, 0..) |value, i| {
             const expect = case.values.?[i];
             try std.testing.expect(value.type == expect.type);
-            try std.testing.expectEqualSlices(u8, value.inner.string, expect.inner.string);
+            try std.testing.expectEqualSlices(u8, value.inner.string.inner, expect.inner.string.inner);
         }
     }
 }
 
-const TypeSignature = enum(u8) {
-    null,
-    byte = 'y',
-    boolean = 'b',
-    int16 = 'n',
-    uint16 = 'q',
-    int32 = 'i',
-    uint32 = 'u',
-    int64 = 'x',
-    uint64 = 't',
-    double = 'd',
-    string = 's',
-    object_path = 'o',
-    signature = 'g',
-    array = 'a',
-    @"struct" = '(', // r
-    variant = 'v',
-    dict_entry = '{', // e
-    unix_fd = 'h',
-
-    /// get the Dbus spec alignment for the given type type
-    fn alignOf(self: TypeSignature) usize {
-        return switch (self) {
-            .null, .signature, .variant, .byte => 1,
-            .int16, .uint16 => 2,
-            .int32, .uint32, .boolean, .string, .object_path, .array, .unix_fd => 4,
-            .int64, .uint64, .double, .@"struct", .dict_entry => 8,
-        };
-    }
-
-    /// get the offset to the next alignment for this type
-    fn alignOffset(self: TypeSignature, index: usize) usize {
-        if (index == 0) return 0;
-        const alignment = self.alignOf();
-        return (~index + 1) & (alignment - 1);
-    }
-};
-
-const BytesIterator = struct {
-    buffer: []const u8,
-    index: usize = 0,
-    const Self = @This();
-
-    fn pos(self: *Self) usize {
-        return self.index;
-    }
-
-    fn next(self: *Self, T: TypeSignature, t: ?TypeSignature) ?[]const u8 {
-        const result, const n = self.peek(T, t) orelse return null;
-        self.index += n;
-        return result;
-    }
-
-    fn peek(self: *Self, T: TypeSignature, t: ?TypeSignature) ?struct{ []const u8, usize } {
-        const offset = T.alignOffset(self.index);
-        var alignment = self.index + offset;
-        if (alignment >= self.buffer.len) return null;
-
-        return switch (T) {
-            .byte => .{
-                self.buffer[alignment..][0..@sizeOf(u8)],
-                offset + @sizeOf(u8)
-            },
-            .boolean => .{
-                self.buffer[alignment..][0..@sizeOf(u32)],
-                offset + @sizeOf(u32)
-            },
-            .int16 => .{
-                self.buffer[alignment..][0..@sizeOf(i16)],
-                offset + @sizeOf(i16)
-            },
-            .uint16 => .{
-                self.buffer[alignment..][0..@sizeOf(u16)],
-                offset + @sizeOf(u16)
-            },
-            .int32 => .{
-                self.buffer[alignment..][0..@sizeOf(i32)],
-                offset + @sizeOf(i32)
-            },
-            .uint32 => .{
-                self.buffer[alignment..][0..@sizeOf(u32)],
-                offset + @sizeOf(u32)
-            },
-            .int64 => .{
-                self.buffer[alignment..][0..@sizeOf(i64)],
-                offset + @sizeOf(i64)
-            },
-            .uint64 => .{
-                self.buffer[alignment..][0..@sizeOf(u64)],
-                offset + @sizeOf(u64)
-            },
-            .double => .{
-                self.buffer[alignment..][0..@sizeOf(f64)],
-                offset + @sizeOf(f64)
-            },
-            .signature => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u8)];
-                const len = mem.readInt(u8, slice, .little);
-                const ret = self.buffer[alignment+@sizeOf(u8)..][0..len];
-                const n = offset + len + @sizeOf(u8) + 1; // 1 for null byte
-                break :blk .{ ret, n };
-            },
-            .variant => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u8)];
-                const len = mem.readInt(u8, slice, .little);
-                const ret = self.buffer[alignment+@sizeOf(u8)..][0..len];
-                const n = offset + len + @sizeOf(u8) + 1; // 1 for null byte
-                break :blk .{ ret, n }; // 1 for null byte
-            },
-            .object_path, .string => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u32)];
-                const len = mem.readInt(u32, slice, .little);
-                const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
-                const n = offset + len + @sizeOf(u32) + 1;
-                break :blk .{ ret, n }; // 1 for null byte
-            },
-            .array => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u32)];
-                const len = mem.readInt(u32, slice, .little);
-                const offset_ = t.?.alignOffset(alignment + @sizeOf(u32));
-                alignment += offset_;
-                const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
-                const n = offset + offset_ + len + @sizeOf(u32) + 1;
-                break :blk .{ ret, n };
-            },
-            .@"struct", .dict_entry  => .{ self.buffer[alignment..], offset },
-            else =>  null,
-        };
-    }
-};
-
-const SignatureIterator = struct {
-    buffer: []const u8,
-    index: usize = 0,
-
-    const Self = @This();
-
-    fn next(self: *Self) ?u8 {
-        const result = self.peek() orelse return null;
-        self.index += 1;
-        return result;
-    }
-
-    fn peek(self: *Self) ?u8 {
-        if (self.index >= self.buffer.len) return null;
-        return self.buffer[self.index];
-    }
-
-    fn rest(self: *Self) []const u8 {
-        return self.buffer[self.index..];
-    }
-
-    fn advance(self: *Self, n: usize) void {
-        self.index += n;
-    }
-};
-
-const ValueUnion = union(enum) {
-    byte: u8,
-    boolean: bool,
-    int16: i16,
-    uint16: u16,
-    int32: i32,
-    uint32: u32,
-    int64: i64,
-    uint64: u64,
-    double: f64,
-    string: []const u8,
-    object_path: []const u8,
-    signature: []const u8,
-    array: Values,
-    @"struct": Values,
-    variant: struct{[]const u8, *Value},
-    dict_entry: struct{*Value, *Value},
-};
-
-pub const Value = struct {
-    type: TypeSignature,
-    inner: ValueUnion,
-    contained_sig: ?[]const u8 = null,
-    slice: ?[]const u8 = null,
-};
-
-const Values = struct {
-    values: ArrayList(Value),
-
-    const Self = @This();
-
-    pub fn init(alloc: Allocator) Values {
-        return .{
-            .values = ArrayList(Value).init(alloc),
-        };
-    }
-
-    fn free(alloc: Allocator, value: *Value) void {
-        switch (value.*.inner) {
-            .array, .@"struct" => |*val| {
-                val.deinit(alloc);
-            },
-            .variant => |v| {
-                free(alloc, v[1]);
-                alloc.destroy(v[1]);
-            },
-            .dict_entry => |v| {
-                free(alloc, v[0]);
-                free(alloc, v[1]);
-            },
-            else => {},
-        }
-    }
-
-    pub fn deinit(self: *Values, alloc: Allocator) void {
-        for (self.values.items) |*value| {
-            free(alloc, value);
-            // TODO: don't want to have to allocate these
-            // when generating the message
-            // alloc.free(value.contained_sig);
-            // alloc.free(value.slice);
-        }
-        self.values.deinit();
-    }
-
-    /// Get a reference to the value at the given index,
-    /// returns null if the index is out of bounds.
-    pub fn get(self: *Values, index: usize) ?*Value {
-        if (index >= self.values.items.len) return null;
-        return &self.values.items[index];
-    }
-
-    /// Append a new value to the values array.
-    pub fn append(self: *Values, value: Value) !void {
-        try self.values.append(value);
-    }
-
-    pub fn appendSlice(self: *Self, slice: []const Value) !void {
-        try self.values.appendSlice(slice);
-    }
-
-    pub fn fromSlice(alloc: Allocator, slice: []const Value) !Values {
-        var values = try ArrayList(Value).initCapacity(alloc, slice.len);
-        values.insertSlice(0, slice) catch unreachable;
-        return .{
-            .values = values,
-        };
-    }
-};
-
-fn nest(alloc: Allocator, depth: u8) Values {
-    if (depth == 0) return blk: {
-        var v = Values.init(alloc);
-        v.append(.{ .type = .byte, .inner = .{ .byte = 1 }}) catch unreachable;
-        break :blk v;
-    };
-    var v = Values.init(alloc);
-    v.append(.{ .type = .array, .inner = .{ .array = nest(alloc, depth - 1) } }) catch unreachable;
-    return v;
-}
-
-test "values arrays" {
-    const alloc = std.testing.allocator;
-    var values = Values.init(alloc);
-    try values.append(.{
-        .type = .array,
-        .inner = .{ .array = nest(alloc, 10) },
-        .contained_sig = "aaaaaaaaaaay",
-        .slice = &[_]u8{}
-    });
-    values.deinit(alloc);
-}

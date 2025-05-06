@@ -34,10 +34,11 @@ pub const Dbus = struct {
     name: ?[]const u8 = null,
     server_address: ?[]const u8 = undefined,
 
-    method_call_callback: ?*const fn (bus: *Dbus, msg: Message) void = null,
-    method_return_callback: ?*const fn (bus: *Dbus, msg: Message) void = null,
-    error_callback: ?*const fn (bus: *Dbus, msg: Message) void = null,
-    signal_callback: ?*const fn (bus: *Dbus, msg: Message) void = null,
+    wrapped: ?*const anyopaque = null,
+    method_call_callback: ?*const fn (bus: *Dbus, msg: Message, w: ?*const anyopaque) void = null,
+    method_return_callback: ?*const fn (bus: *Dbus, msg: Message, w: ?*const anyopaque) void = null,
+    error_callback: ?*const fn (bus: *Dbus, msg: Message, w: ?*const anyopaque) void = null,
+    signal_callback: ?*const fn (bus: *Dbus, msg: Message, w: ?*const anyopaque) void = null,
 
     const State = enum {
         disconnected,
@@ -87,6 +88,10 @@ pub const Dbus = struct {
         try bus.authenticate();
         try bus.hello();
         bus.read(null, null);
+    }
+
+    pub fn run(bus: *Dbus, mode: xev.RunMode) !void {
+        try bus.loop.run(mode);
     }
 
     pub fn connect(bus: *Dbus) !void {
@@ -250,14 +255,8 @@ pub const Dbus = struct {
         };
         defer msg.deinit(bus.allocator);
 
-        if (msg.header.msg_type == .@"error") {
-            if (bus.error_callback) |f| f(bus, msg) else {
-                std.log.err("onHelloRead: unhandled error: {any}", .{msg.error_name.?});
-            }
-        }
-
         bus.name = bus.allocator.dupe(
-            u8, msg.values.?.values.getLast().inner.string
+            u8, msg.values.?.values.getLast().inner.string.inner
         ) catch unreachable;
 
         bus.state = .ready;
@@ -268,11 +267,10 @@ pub const Dbus = struct {
         var msg = message.RequestName;
         try msg.appendString(bus.allocator, .string, name);
         try msg.appendInt(bus.allocator, .uint32, 1);
-        defer msg.deinit(bus.allocator);
 
         var c: xev.Completion = undefined;
         try bus.writeMsg(&msg, &c);
-        try bus.loop.run(.until_done);
+        try bus.loop.run(.once);
     }
 
     pub fn writeMsg(bus: *Dbus, msg: *Message, c: ?*xev.Completion) !void {
@@ -314,6 +312,7 @@ pub const Dbus = struct {
         assert(@intFromEnum(bus.state)
             > comptime @intFromEnum(State.connected)
         );
+
         bus.socket.?.read(
             &bus.loop,
             c orelse &bus.read_completion,
@@ -342,9 +341,8 @@ pub const Dbus = struct {
         };
 
         var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-        var reader = fbs.reader();
         while (true) {
-            var msg = bus.decodeMsg(&reader) catch |err| switch (err) {
+            var msg = bus.decodeMsg(fbs.reader()) catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => {
                     std.log.err("client read err: {any}", .{err});
@@ -354,10 +352,10 @@ pub const Dbus = struct {
             defer msg.deinit(bus.allocator);
 
             switch (msg.header.msg_type) {
-                .signal => if (bus.signal_callback) |f| f(bus, msg),
-                .method_return => if (bus.method_return_callback) |f| f(bus, msg),
-                .method_call => if (bus.method_call_callback) |f| f(bus, msg),
-                .@"error" => if (bus.error_callback) |f| f(bus, msg),
+                .signal => if (bus.signal_callback) |f| f(bus, msg, bus.wrapped),
+                .method_return => if (bus.method_return_callback) |f| f(bus, msg, bus.wrapped),
+                .method_call => if (bus.method_call_callback) |f| f(bus, msg, bus.wrapped),
+                .@"error" => if (bus.error_callback) |f| f(bus, msg, bus.wrapped),
                 .invalid => {
                     std.log.err("invalid message type: {any}", .{msg.header.msg_type});
                 },

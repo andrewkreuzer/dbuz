@@ -9,11 +9,11 @@ const xev = @import("xev");
 const ReadBuffer = xev.ReadBuffer;
 const WriteBuffer = xev.WriteBuffer;
 
+const Dispatch = @import("dispatch.zig").Dispatch;
 const message = @import("message.zig");
 const Dbus = @import("dbus.zig").Dbus;
 const Message = message.Message;
-
-pub const NUM_PINGS = 1000;
+const ObjectPath = @import("types.zig").ObjectPath;
 
 pub fn eventLoop() !void {
     try run();
@@ -28,29 +28,53 @@ pub fn run() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var ntfr: Notifier = .{};
+    const notifier = Dispatch(Notifier).bind(&ntfr);
+
     var dbus = try Dbus.init(allocator);
     defer dbus.deinit();
 
-    dbus.method_return_callback = methodReturnCallback;
     dbus.method_call_callback = methodCallCallback;
+    dbus.method_return_callback = methodReturnCallback;
     dbus.signal_callback = signalCallback;
 
     try dbus.start();
-    try dbus.requestName("net.anunknownalias.Dbuz");
-    try dbus.requestName("net.anunknownalias.Notify");
-    try dbus.requestName("net.anunknownalias.Shutdown");
+    try notifier.register(&dbus);
 
     const start_time = try Instant.now();
-    try loop.run(.until_done);
+    try dbus.run(.until_done);
     const end_time = try Instant.now();
 
     const elapsed = @as(f64, @floatFromInt(end_time.since(start_time)));
     std.log.info("{d:.2} seconds", .{elapsed / 1e9});
 }
 
+const Notifier = struct {
+    name: []const u8 = "net.anunknownalias.Dbuz",
+
+    const t = "this";
+
+    pub fn notify(
+        self: *@This(),
+        // path: ObjectPath,
+    ) void {
+        const path: ObjectPath = .{ .inner = "/net/anunknownalias/Dbuz" };
+        std.debug.print("some stuff {s}, {s}\n", .{self.name, path.inner});
+    }
+
+    pub fn notify2(
+        self: *@This(),
+        // path: ObjectPath,
+    ) void {
+        const path: ObjectPath = .{ .inner = "/net/anunknownalias/Dbuz" };
+        std.debug.print("some stuff {s}, {s}\n", .{self.name, path.inner});
+    }
+};
+
 fn methodCallCallback(
     bus: *Dbus,
     m: Message,
+    wrapper: ?*const anyopaque,
 ) void {
     var msg = Message.init(.{
         .msg_type = .method_return,
@@ -68,9 +92,15 @@ fn methodCallCallback(
 
     const arg0 = blk: {
         if (m.values) |v| {
-            break :blk v.values.items[0].inner.array.get(1).?.inner.@"struct".get(0).?.inner.string;
+            break :blk v.values.items;
         } else unreachable;
     };
+
+    _ = wrapper;
+    // if (wrapper) |w| {
+    //     const wrap: *Wrap(Notifier) = @alignCast(@ptrCast(@constCast(w)));
+    //     wrap.methodCallCallback(bus, m);
+    // }
 
     // const arg1 = blk: {
     //     if (m.values) |v| {
@@ -78,7 +108,7 @@ fn methodCallCallback(
     //     } else break :blk 0;
     // };
 
-    std.log.debug("method call received: {s}", .{arg0});
+    std.log.debug("method call received: {any}", .{arg0});
 
     msg.signature = "su"; // TODO: generate, track if allocated?
     msg.appendString(bus.allocator, .string, "HI") catch |err| {
@@ -98,6 +128,7 @@ fn methodCallCallback(
 fn methodReturnCallback(
     _: *Dbus,
     msg: Message,
+    _: ?*const anyopaque,
 ) void {
     switch (msg.values.?.values.items[0].inner.uint32) {
         0x01 => std.log.debug("name request succeded", .{}),
@@ -111,6 +142,7 @@ fn methodReturnCallback(
 fn signalCallback(
     _: *Dbus,
     _: Message,
+    _: ?*const anyopaque,
 ) void {
     std.log.debug("signal received", .{});
 }
@@ -127,5 +159,5 @@ fn noop(
 
 test {
     _ = @import("message.zig");
-    _ = @import("bind.zig");
+    _ = @import("dispatch.zig");
 }
