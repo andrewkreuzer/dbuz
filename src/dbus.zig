@@ -1,16 +1,21 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const mem = std.mem;
 const log = std.log;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const MemoryPool = std.heap.MemoryPool;
+const StringHashMap = std.StringHashMap;
 
 const xev = @import("xev");
 // just treat it as a TCP socket
 const Unix = xev.TCP;
 
 const message = @import("message.zig");
+const iface = @import("interface.zig");
+const Interface = iface.BusInterface;
+const ReturnPtr = iface.ReturnPtr;
 const Message = message.Message;
 const Hello = message.Hello;
 const Value = message.Value;
@@ -34,11 +39,9 @@ pub const Dbus = struct {
     name: ?[]const u8 = null,
     server_address: ?[]const u8 = undefined,
 
-    wrapped: ?*const anyopaque = null,
-    method_call_callback: ?*const fn (bus: *Dbus, msg: Message, w: ?*const anyopaque) void = null,
-    method_return_callback: ?*const fn (bus: *Dbus, msg: Message, w: ?*const anyopaque) void = null,
-    error_callback: ?*const fn (bus: *Dbus, msg: Message, w: ?*const anyopaque) void = null,
-    signal_callback: ?*const fn (bus: *Dbus, msg: Message, w: ?*const anyopaque) void = null,
+    interfaces: StringHashMap(Interface) = undefined,
+    read_callback: ?*const fn (bus: *Dbus, msg: Message) void = null,
+    write_callback: ?*const fn (bus: *Dbus) void = null,
 
     const State = enum {
         disconnected,
@@ -58,11 +61,16 @@ pub const Dbus = struct {
             .allocator = allocator,
             .message_pool = MemoryPool(Message).init(allocator),
             .uid = uid,
+            .interfaces = StringHashMap(Interface).init(allocator),
         };
     }
 
     pub fn deinit(bus: *Dbus) void {
         if (bus.name) |name| bus.allocator.free(name);
+    }
+
+    pub fn bind(bus: *Dbus, name: []const u8, interface: Interface) void {
+        bus.interfaces.put(name, interface) catch unreachable;
     }
 
     pub fn defaultSocketPath(uid: u32) []const u8 {
@@ -87,6 +95,7 @@ pub const Dbus = struct {
         try bus.connect();
         try bus.authenticate();
         try bus.hello();
+        try bus.requestBoundNames();
         bus.read(null, null);
     }
 
@@ -150,7 +159,7 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         const bus = bus_.?;
         _ = r catch |err| {
-            std.log.err("client write err: {any}", .{err});
+            log.err("client write err: {any}", .{err});
             socket.shutdown(l, c, Dbus, bus, onShutdown);
             return .disarm;
         };
@@ -173,14 +182,14 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         const bus = bus_.?;
         const n = r catch |err| {
-            std.log.err("client read err: {any}", .{err});
+            log.err("client read err: {any}", .{err});
             return .disarm;
         };
 
         const slice = b.slice[0..n];
 
         if (bus.state != .authenticating) {
-            std.log.err("client read unexpected state: {any}", .{bus.state});
+            log.err("client read unexpected state: {any}", .{bus.state});
             socket.shutdown(l, c, Dbus, bus, onShutdown);
             return .disarm;
         }
@@ -188,7 +197,7 @@ pub const Dbus = struct {
         var iter = std.mem.splitScalar(u8, slice, ' ');
         const ok = iter.first();
         if (!std.mem.eql(u8, ok, "OK")) {
-            std.log.err("client read unexpected: {s}", .{slice});
+            log.err("client read unexpected: {s}", .{slice});
             socket.shutdown(l, c, Dbus, bus, onShutdown);
             return .disarm;
         }
@@ -225,7 +234,7 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         const bus = bus_.?;
         _ = r catch |err| {
-            std.log.err("client write err: {any}", .{err});
+            log.err("client write err: {any}", .{err});
             socket.shutdown(l, c, Dbus, bus, onShutdown);
             return .disarm;
         };
@@ -243,7 +252,7 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         var bus = bus_.?;
         _ = r catch |err| {
-            std.log.err("client read err: {any}", .{err});
+            log.err("client read err: {any}", .{err});
             return .disarm;
         };
 
@@ -263,7 +272,18 @@ pub const Dbus = struct {
         return .disarm;
     }
 
+    fn requestBoundNames(
+        bus: *Dbus,
+    ) !void {
+        if (bus.interfaces.count() == 0) return;
+        var iter = bus.interfaces.keyIterator();
+        while (iter.next()) |name| {
+            try bus.requestName(name.*);
+        }
+    }
+
     pub fn requestName(bus: *Dbus, name: []const u8) !void {
+        log.info("requesting name: {s}", .{name});
         var msg = message.RequestName;
         try msg.appendString(bus.allocator, .string, name);
         try msg.appendInt(bus.allocator, .uint32, 1);
@@ -284,10 +304,6 @@ pub const Dbus = struct {
         bus.write(bytes, c, null);
     }
 
-    fn decodeMsg(bus: *Dbus, reader: anytype) !Message {
-        return Message.decode(bus.allocator, reader);
-    }
-
     fn read(
         bus: *Dbus,
         c: ?*xev.Completion,
@@ -305,7 +321,7 @@ pub const Dbus = struct {
         if (@intFromEnum(bus.state)
             < comptime @intFromEnum(State.connected)
         ) {
-            std.log.err("client read: bus is disconnected", .{});
+            log.err("client read: bus is disconnected", .{});
             return;
         }
 
@@ -335,31 +351,29 @@ pub const Dbus = struct {
         const n = r catch |err| switch (err) {
             error.EOF => return .rearm, // TODO
             else => {
-                std.log.err("client read err: {any}", .{err});
+                log.err("client read err: {any}", .{err});
                 return .disarm;
             }
         };
 
         var fbs = std.io.fixedBufferStream(b.slice[0..n]);
         while (true) {
-            var msg = bus.decodeMsg(fbs.reader()) catch |err| switch (err) {
+            var msg = Message.decode(bus.allocator, fbs.reader()) catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => {
-                    std.log.err("client read err: {any}", .{err});
-                    return .disarm;
+                    log.err("client read err: {any}", .{err});
+                    return .disarm; // TODO: rearm
                 },
             };
             defer msg.deinit(bus.allocator);
 
-            switch (msg.header.msg_type) {
-                .signal => if (bus.signal_callback) |f| f(bus, msg, bus.wrapped),
-                .method_return => if (bus.method_return_callback) |f| f(bus, msg, bus.wrapped),
-                .method_call => if (bus.method_call_callback) |f| f(bus, msg, bus.wrapped),
-                .@"error" => if (bus.error_callback) |f| f(bus, msg, bus.wrapped),
-                .invalid => {
-                    std.log.err("invalid message type: {any}", .{msg.header.msg_type});
-                },
-            }
+            if (bus.read_callback) |cb| cb(bus, msg);
+
+            if (msg.interface == null) continue;
+            if (msg.member == null) continue;
+
+            const interface = bus.interfaces.get(msg.interface.?);
+            if (interface) |i| i.call(bus, &msg);
         }
 
         return .rearm;
@@ -383,7 +397,7 @@ pub const Dbus = struct {
         if (@intFromEnum(bus.state)
             < comptime @intFromEnum(State.connected)
         ) {
-            std.log.err("client write: bus is disconnected", .{});
+            log.err("client write: bus is disconnected", .{});
             return;
         }
         assert(@intFromEnum(bus.state)
@@ -415,11 +429,12 @@ pub const Dbus = struct {
             error.Canceled,
             error.Unexpected,
                 => {
-                std.log.err("client write err: {any}", .{err});
+                log.err("client write err: {any}", .{err});
                 socket.shutdown(l, c, Dbus, bus, onShutdown);
                 return .disarm;
             }
         };
+        if (bus.write_callback) |cb| cb(bus);
 
         return .disarm;
     }
@@ -446,6 +461,7 @@ pub const Dbus = struct {
         r: xev.ShutdownError!void,
     ) xev.CallbackAction {
         _ = r catch unreachable;
+        log.debug("client shutdown: {any}", .{r});
 
         const bus = bus_.?;
         socket.close(l, c, Dbus, bus, onClose);
@@ -462,6 +478,7 @@ pub const Dbus = struct {
         _ = l;
         _ = socket;
         _ = r catch unreachable;
+        log.debug("client close: {any}", .{r});
 
         bus_.?.state = .disconnected;
         return .disarm;

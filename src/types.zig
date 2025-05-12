@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 
@@ -116,7 +117,7 @@ pub const Values = struct {
         self.values.deinit();
     }
 
-    pub fn len(self: *Values) usize {
+    pub fn len(self: *const Values) usize {
         return self.values.items.len;
     }
 
@@ -132,18 +133,140 @@ pub const Values = struct {
         try self.values.append(value);
     }
 
-    pub fn appendSlice(self: *Self, slice: []const Value) !void {
+    pub fn appendAnyType(self: *Values, alloc: Allocator, value: anytype) !void {
+        try switch(@typeInfo(@TypeOf(value))) {
+            // .type => values.append(.{}),
+            // .void => values.append(.{}),
+            .bool => self.values.append(.{ .type = .boolean, .inner = .{ .boolean = value }}),
+            // .noreturn => values.append(.{}),
+            .int => |i| switch (i.bits) {
+                0...8 => self.values.append(.{ .type = .byte, .inner = .{ .byte = @as(u8, value) }}),
+                9...16 => self.values.append(.{
+                    .type = if (i.signedness == .signed) .int16 else .uint16,
+                    .inner =
+                        if (i.signedness == .signed) .{ .int16 = @as(i16, value) }
+                        else .{ .uint16 = @as(u16, value) }
+                }),
+                17...32 => self.values.append(.{
+                    .type = if (i.signedness == .signed) .int32 else .uint32,
+                    .inner =
+                        if (i.signedness == .signed) .{ .int32 = @as(i32, value) }
+                        else .{ .uint32 = @as(u32, value) }
+                }),
+                33...64 => self.values.append(.{
+                    .type = if (i.signedness == .signed) .int64 else .uint64,
+                    .inner =
+                        if (i.signedness == .signed) .{ .int64 = @as(i64, value) }
+                        else .{ .uint64 = @as(u64, value) }
+                }),
+                else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
+            },
+            .float => |i| switch (i.bits) {
+                64 => self.values.append(.{ .type = .double, .inner = .{ .double = @as(f64, value) }}),
+                else => @panic("invalid float, floats must be equal to 64 bits (IEEE 574)")
+            },
+            .pointer => |p| switch (p.size) {
+                .one => self.appendAnyType(value.*),
+                .many => {},
+                .slice => switch (p.child) {
+                    // TODO: should we assume u8 slices are strings?
+                    u8 => self.append(.{ .type = .string, .inner = .{ .string = String{ .inner = value } } }),
+                    else => self.append(.{ .type = .array, .inner = .{ .array = Values.fromSlice(alloc, p.child, value.*) } }),
+                },
+                .c => {},
+            },
+            .array => |a| self.values.append(Values.fromSlice(alloc, a.child, &value)),
+            .@"struct" => self.values.append(.{}),
+            .comptime_float => self.values.append(.{}),
+            .comptime_int => self.values.append(.{}),
+            // .undefined => values.append(.{}),
+            // .null => values.append(.{}),
+            // .optional => values.append(.{}),
+            // .error_union => values.append(.{}),
+            // .error_set => values.append(.{}),
+            // .@"enum" => values.append(.{}),
+            // .@"union" => values.append(.{}),
+            // .@"fn" => values.append(.{}),
+            // .@"opaque" => values.append(.{}),
+            // .frame => values.append(.{}),
+            // .@"anyframe" => values.append(.{}),
+            // .vector => values.append(.{}),
+            // .enum_literal => values.append(.{}),
+            else => return error.InvalidType,
+        };
+    }
+
+    pub fn appendSliceOfValues(self: *Self, slice: []const Value) !void {
         try self.values.appendSlice(slice);
     }
 
-    pub fn fromSlice(alloc: Allocator, slice: []const Value) !Values {
+    pub fn fromSliceOfValues(alloc: Allocator, slice: []const Value) !Values {
         var values = try ArrayList(Value).initCapacity(alloc, slice.len);
-        values.insertSlice(0, slice) catch unreachable;
-        return .{
-            .values = values,
-        };
+        try values.insertSlice(0, slice);
+        return .{ .values = values };
+    }
+
+    pub fn fromSlice(alloc: Allocator, Child: anytype, slice: []const Child) !Values {
+        var array_values = Values.init(alloc);
+        for (slice) |item| {
+            try array_values.appendAnyType(alloc, item);
+        }
+
+        var values = ArrayList(Value).init(alloc);
+        try values.append(.{ .type = .array, .inner = .{ .array = array_values }, .contained_sig = "" });
+        return .{ .values = values };
+    }
+
+    pub fn appendStruct(self: *Self, alloc: Allocator, @"struct": anytype) !void {
+        const struct_info = @typeInfo(@TypeOf(@"struct"));
+        assert(struct_info == .@"struct");
+
+        const buf: []u8 = try alloc.alloc(u8, @sizeOf(@TypeOf(@"struct")));
+        var fbs = std.io.fixedBufferStream(buf);
+        const buf_writer = fbs.writer();
+
+        var struct_values = Values.init(alloc);
+        var n: usize = 0;
+        inline for (struct_info.@"struct".fields) |f| {
+            const value = @field(@"struct", f.name);
+            try struct_values.appendAnyType(alloc, value);
+            const bytes = std.mem.toBytes(value);
+            n += bytes.len;
+            try buf_writer.writeAll(&bytes);
+        }
+
+        try self.append(.{ .type = .@"struct", .inner = .{ .@"struct" = struct_values }, .contained_sig = "", .slice = buf[0..n] });
     }
 };
+
+test "values from struct" {
+    const alloc = std.testing.allocator;
+    const s = struct {
+        a: u8,
+        b: u16,
+        c: u32,
+        d: u64,
+        e: f64,
+        f: bool,
+        g: []const u8,
+    }{
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+        .e = 5.0,
+        .f = true,
+        .g = "hello",
+    };
+    var values = Values.init(alloc);
+    try values.appendStruct(alloc, s);
+    defer values.deinit(alloc);
+    // TODO: gets allocated for wrting a msg but isn't when reading
+    // so we either need to allocate the read or find an alternate
+    // when writing
+    alloc.free(values.values.items[0].slice.?);
+    assert(values.values.items[0].inner.@"struct".len() == 7);
+}
 
 fn nestArray(alloc: Allocator, depth: u8) Values {
     if (depth == 0) return blk: {

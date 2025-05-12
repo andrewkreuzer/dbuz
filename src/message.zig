@@ -4,6 +4,7 @@ const builtin = std.builtin;
 const mem = std.mem;
 const meta = std.meta;
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 
 const types = @import("types.zig");
@@ -92,6 +93,9 @@ pub const Message = struct {
     // list of values in the message
     values: ?Values = null,
 
+    // Yes??
+    arena: ?ArenaAllocator = null,
+
     const Self = @This();
 
     pub fn init(opts: MsgOptions) Self {
@@ -140,27 +144,62 @@ pub const Message = struct {
     ) !void {
         var values = self.values orelse Values.init(alloc);
 
-        const v: Value = switch (T) {
-            .byte => .{ .type = T, .inner = .{ .byte = value }},
-            .uint16 => .{ .type = T, .inner = .{ .uint16 = value }},
-            .int16 => .{ .type = T, .inner = .{ .int16 = value }},
-            .uint32 => .{ .type = T, .inner = .{ .uint32 = value }},
-            .int32 => .{ .type = T, .inner = .{ .int32 = value }},
-            .int64 => .{ .type = T, .inner = .{ .int64 = value }},
-            .uint64 => .{ .type = T, .inner = .{ .uint64 = value }},
-            .double => .{ .type = T, .inner = .{ .double = value }},
-            else => {
-                std.log.debug("invalid type: {any}", .{@TypeOf(value)});
-                return error.InvalidIntType;
-            }
+        const v: ?Value = switch (@TypeOf(value)) {
+            u8 => if (T == .byte) .{ .type = T, .inner = .{ .byte = value }} else null,
+            u16 => if (T == .uint16) .{ .type = T, .inner = .{ .uint16 = value }} else null,
+            i16 => if (T == .int16) .{ .type = T, .inner = .{ .int16 = value }} else null,
+            u32 => if (T == .uint32) .{ .type = T, .inner = .{ .uint32 = value }} else null,
+            i32 => if (T == .int32) .{ .type = T, .inner = .{ .int32 = value }} else null,
+            u64 => if (T == .uint64) .{ .type = T, .inner = .{ .uint64 = value }} else null,
+            i64 => if (T == .int64) .{ .type = T, .inner = .{ .int64 = value }} else null,
+            f64 => if (T == .double) .{ .type = T, .inner = .{ .double = value }} else null,
+            comptime_int, comptime_float => switch (T) {
+                .byte => .{ .type = T, .inner = .{ .byte = @as(u8, @intCast(value)) }},
+                .uint16 => .{ .type = T, .inner = .{ .uint16 = @as(u16, @intCast(value)) }},
+                .int16 => .{ .type = T, .inner = .{ .int16 = @as(i16, @intCast(value)) }},
+                .uint32 => .{ .type = T, .inner = .{ .uint32 = @as(u32, @intCast(value)) }},
+                .int32 => .{ .type = T, .inner = .{ .int32 = @as(i32, @intCast(value)) }},
+                .uint64 => .{ .type = T, .inner = .{ .uint64 = @as(u64, @intCast(value)) }},
+                .int64 => .{ .type = T, .inner = .{ .int64 = @as(i64, @intCast(value)) }},
+                .double => .{ .type = T, .inner = .{ .double = value }},
+                else => null,
+            },
+            else => null,
         };
+        if (v == null) {
+            std.log.debug("invalid type: {any}", .{@TypeOf(value)});
+            return error.InvalidIntType;
+        }
+        try values.append(v.?);
+        self.values = values;
+    }
+
+    pub fn appendBool(
+        self: *Self,
+        alloc: Allocator,
+        value: bool
+    ) !void {
+        var values = self.values orelse Values.init(alloc);
+        const v: Value = .{ .type = .boolean, .inner = .{ .boolean = value } };
         try values.append(v);
+        self.values = values;
+    }
+
+    pub fn appendStruct(
+        self: *Self,
+        alloc: Allocator,
+        @"struct": anytype,
+    ) !void {
+        const struct_info = @typeInfo(@TypeOf(@"struct"));
+        assert(struct_info == .@"struct");
+        var values = self.values orelse Values.init(alloc);
+        try values.appendStruct(alloc, @"struct");
         self.values = values;
     }
 
     pub fn appendValuesFromSlice(self: *Self, alloc: Allocator, slice: []const Value) !void {
         var values = self.values orelse Values.init(alloc);
-        try values.appendSlice(slice);
+        try values.appendSliceOfValues(slice);
         self.values = values;
     }
 
@@ -297,7 +336,7 @@ pub const Message = struct {
                         i += @sizeOf(u8);
                     },
                     .boolean => {
-                        try buf_writer.writeInt(u32, value.inner.uint32, .little);
+                        try buf_writer.writeInt(u32, @as(u32, @intFromBool(value.inner.boolean)), .little);
                         i += @sizeOf(u32);
                     },
                     .int16 => {
@@ -340,8 +379,14 @@ pub const Message = struct {
                         try buf_writer.writeByte(0x00);
                         i += @sizeOf(u32) + value.inner.object_path.inner.len + 1;
                     },
+                    .@"struct" => {
+                        assert(value.slice != null);
+                        std.debug.print("writing struct: {d}\n", .{value.slice.?});
+                        try buf_writer.writeAll(value.slice.?);
+                        i += @sizeOf(@TypeOf(value.inner.@"struct"));
+                    },
                     // TODO:
-                    // .signature, array, .@"struct", .dict_entry, .variant, .unix_fd
+                    // .signature, array, .dict_entry, .variant, .unix_fd
                     else => unreachable,
                 }
             }
