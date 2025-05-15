@@ -16,6 +16,7 @@ const xev = @import("xev");
 const Dbus = @import("dbus.zig").Dbus;
 const Message = @import("message.zig").Message;
 const Values = @import("types.zig").Values;
+const TypeSignature = @import("types.zig").TypeSignature;
 
 pub const BusInterface = struct {
     ptr: *const anyopaque,
@@ -125,7 +126,7 @@ pub fn Interface(comptime T: anytype) type {
                         .name = decl.name,
                         .member = dbus_name,
                         .@"fn" = fnGeneric(Fn, decl.name, @field(T, decl.name)),
-                        .return_sig = returnSig(@typeInfo(decl_info.@"fn".return_type.?)),
+                        .return_sig = TypeSignature.fromType(decl_info.@"fn".return_type.?),
                     };
 
                     kvs[i] = .{ dbus_name, m };
@@ -224,7 +225,7 @@ pub fn Interface(comptime T: anytype) type {
                                 if (i.signedness == .signed) .int64 else .uint64,
                                 if (i.signedness == .signed) @as(i64, ret) else @as(u64, ret),
                             ),
-                            else => @panic("invalid int, ints must be small than or equal to 64 bits")
+                            else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
                         },
                         .@"struct" => resp.appendStruct(bus.allocator, ret),
                         else => @panic("unsupported return type")
@@ -232,39 +233,9 @@ pub fn Interface(comptime T: anytype) type {
                     } catch unreachable;
 
                     std.debug.print("return sig: {s}\n", .{sig.?});
-                    bus.writeMsg(&resp, null) catch log.debug("failed to write message", .{});
+                    bus.writeMsg(&resp, null) catch log.err("failed to write message", .{});
                 }
             }.f;
-        }
-
-        inline fn returnSig(sig: Type) ?[]const u8 {
-            comptime {
-                return switch (sig) {
-                    .void => null,
-                    .null, .optional => @compileError("Invalid type, functions cannot return null"),
-                    .bool => "b",
-                    .int => |i| switch (i.bits) {
-                        0...8 => "y",
-                        9...16 => if (i.signedness == .unsigned) "q" else "n",
-                        17...32 => if (i.signedness == .unsigned) "u" else "i",
-                        33...64 => if (i.signedness == .unsigned) "t" else "x",
-                        else => @compileError("Invalid int, dbus only supports up to 8, 16, 32, and 64 bit integers"),
-                    },
-                    .float => |f| blk: {
-                        if (f.bits != 64) @compileError("Invalid fload, dbus only supports IEEE 754 floats");
-                        break :blk "d";
-                    },
-                    .array => |a| "a" ++ returnSig(@typeInfo(a.child)),
-                    .@"struct" => |s| blk: {
-                        var fields: []const u8 = "";
-                        for (s.fields) |f| {
-                            fields = fields ++ (returnSig(@typeInfo(f.type)) orelse ""); // TODO
-                        }
-                        break :blk "(" ++ fields ++ ")";
-                    },
-                    else => null,
-                };
-            }
         }
     };
 }

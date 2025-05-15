@@ -246,71 +246,74 @@ pub const Message = struct {
             const buf_writer = buf.writer();
             errdefer buf.deinit();
 
-            var last: usize = 0;
+            var size: usize = 0;
             if (self.path) |path| {
                 try writeFieldString(.path, .object_path, path, buf.items.len, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
             if (self.member) |member| {
                 try writeFieldString(.member, .string, member, buf.items.len, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
             if (self.interface) |iface| {
                 try writeFieldString(.interface, .string, iface, buf.items.len, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
             if (self.error_name) |error_name| {
                 try writeFieldString(.error_name, .string, error_name, buf.items.len, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
             if (self.destination) |dest| {
                 try writeFieldString(.destination, .string, dest, buf.items.len, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
             if (self.reply_serial) |serial| {
                 try writeFieldIntU32(.reply_serial, serial, buf.items.len, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
             if (self.signature) |signature| {
                 try writeFieldSignature(signature, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
             if (self.sender) |sender| {
                 try writeFieldString(.sender, .string, sender, buf.items.len, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
             if (self.unix_fds) |fds| {
                 try writeFieldIntU32(.unix_fds, fds, buf.items.len, buf_writer);
-                last = buf.items.len;
+                size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
-            self.header.fields_len = @as(u32, @intCast(last));
+            // I would think we could use the buf.items.len for this
+            // but it fails tests with incorrect size for fields
+            // and I'm to lazy to figure out why right now
+            self.header.fields_len = @as(u32, @intCast(size));
 
             const pad = TypeSignature.@"struct".alignOffset(buf.items.len);
             try buf_writer.writeByteNTimes(0x00, pad);
@@ -327,63 +330,32 @@ pub const Message = struct {
             const pad = T.alignOffset(@sizeOf(Header) + self.fields_buf.?.len);
             try buf_writer.writeByteNTimes(0x00, pad);
 
-            var i: usize = 0;
             for (values.values.items) |value| {
-                try buf_writer.writeByteNTimes(0x00, value.type.alignOffset(i));
+                try buf_writer.writeByteNTimes(0x00, value.type.alignOffset(buf.items.len));
                 switch (value.type) {
-                    .byte => {
-                        try buf_writer.writeByte(value.inner.byte);
-                        i += @sizeOf(u8);
-                    },
-                    .boolean => {
-                        try buf_writer.writeInt(u32, @as(u32, @intFromBool(value.inner.boolean)), .little);
-                        i += @sizeOf(u32);
-                    },
-                    .int16 => {
-                        try buf_writer.writeInt(i16, value.inner.int16, .little);
-                        i += @sizeOf(i16);
-                    },
-                    .uint16 => {
-                        try buf_writer.writeInt(u16, value.inner.uint16, .little);
-                        i += @sizeOf(u16);
-                    },
-                    .int32 => {
-                        try buf_writer.writeInt(i32, value.inner.int32, .little);
-                        i += @sizeOf(i32);
-                    },
-                    .uint32 => {
-                        try buf_writer.writeInt(u32, value.inner.uint32, .little);
-                        i += @sizeOf(u32);
-                    },
-                    .int64 => {
-                        try buf_writer.writeInt(i64, value.inner.int64, .little);
-                        i += @sizeOf(i64);
-                    },
-                    .uint64 => {
-                        try buf_writer.writeInt(u64, value.inner.uint64, .little);
-                        i += @sizeOf(u64);
-                    },
-                    .double => {
-                        try buf_writer.writeInt(u64, @as(u64, @bitCast(value.inner.double)), .little);
-                        i += @sizeOf(f64);
-                    },
+                    .byte => try buf_writer.writeByte(value.inner.byte),
+                    .boolean => try buf_writer.writeInt(u32, @as(u32, @intFromBool(value.inner.boolean)), .little),
+                    .int16 => try buf_writer.writeInt(i16, value.inner.int16, .little),
+                    .uint16 => try buf_writer.writeInt(u16, value.inner.uint16, .little),
+                    .int32 => try buf_writer.writeInt(i32, value.inner.int32, .little),
+                    .uint32 => try buf_writer.writeInt(u32, value.inner.uint32, .little),
+                    .int64 => try buf_writer.writeInt(i64, value.inner.int64, .little),
+                    .uint64 => try buf_writer.writeInt(u64, value.inner.uint64, .little),
+                    .double => try buf_writer.writeInt(u64, @as(u64, @bitCast(value.inner.double)), .little),
                     .string => {
                         try buf_writer.writeInt(u32, @as(u32, @intCast(value.inner.string.inner.len)), .little);
                         try buf_writer.writeAll(value.inner.string.inner);
                         try buf_writer.writeByte(0x00);
-                        i += @sizeOf(u32) + value.inner.string.inner.len + 1;
                     },
                     .object_path => {
                         try buf_writer.writeInt(u32, @as(u32, @intCast(value.inner.object_path.inner.len)), .little);
                         try buf_writer.writeAll(value.inner.object_path.inner);
                         try buf_writer.writeByte(0x00);
-                        i += @sizeOf(u32) + value.inner.object_path.inner.len + 1;
                     },
                     .@"struct" => {
                         assert(value.slice != null);
                         std.debug.print("writing struct: {d}\n", .{value.slice.?});
                         try buf_writer.writeAll(value.slice.?);
-                        i += @sizeOf(@TypeOf(value.inner.@"struct"));
                     },
                     // TODO:
                     // .signature, array, .dict_entry, .variant, .unix_fd

@@ -1,7 +1,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
+const Endian = std.builtin.Endian;
+const Writer = std.io.AnyWriter;
 
 pub const TypeSignature = enum(u8) {
     null,
@@ -22,6 +25,37 @@ pub const TypeSignature = enum(u8) {
     variant = 'v',
     dict_entry = '{', // e
     unix_fd = 'h',
+
+    pub inline fn fromType(T: type) ?[]const u8 {
+        comptime {
+            const sig = @typeInfo(T);
+            return switch (sig) {
+                .void => null,
+                .null, .optional => @compileError("Invalid type, functions cannot return null"),
+                .bool => "b",
+                .int => |i| switch (i.bits) {
+                    0...8 => "y",
+                    9...16 => if (i.signedness == .unsigned) "q" else "n",
+                    17...32 => if (i.signedness == .unsigned) "u" else "i",
+                    33...64 => if (i.signedness == .unsigned) "t" else "x",
+                    else => @compileError("Invalid int, dbus only supports up to 8, 16, 32, and 64 bit integers"),
+                },
+                .float => |f| blk: {
+                    if (f.bits != 64) @compileError("Invalid float, dbus only supports IEEE 754 floats");
+                    break :blk "d";
+                },
+                .array => |a| "a" ++ fromType(a.child),
+                .@"struct" => |s| blk: {
+                    var fields: []const u8 = "";
+                    for (s.fields) |f| {
+                        fields = fields ++ (fromType(f.type) orelse ""); // TODO
+                    }
+                    break :blk "(" ++ fields ++ ")";
+                },
+                else => null,
+            };
+        }
+    }
 
     /// get the Dbus spec alignment for the given type type
     fn alignOf(self: TypeSignature) usize {
@@ -176,7 +210,7 @@ pub const Values = struct {
                 .c => {},
             },
             .array => |a| self.values.append(Values.fromSlice(alloc, a.child, &value)),
-            .@"struct" => self.values.append(.{}),
+            .@"struct" => self.appendStruct(alloc, value),
             .comptime_float => self.values.append(.{}),
             .comptime_int => self.values.append(.{}),
             // .undefined => values.append(.{}),
@@ -217,25 +251,137 @@ pub const Values = struct {
         return .{ .values = values };
     }
 
+    fn writeBytes(comptime T: type, w: Writer, pos: usize, v: T) !usize {
+        var i = pos;
+        switch (@typeInfo(T)) {
+            .@"struct" => |struct_info| {
+                try w.writeByteNTimes(0x00, TypeSignature.@"struct".alignOffset(i));
+                inline for (struct_info.fields) |f| {
+                    if (struct_info.backing_integer) |Int| {
+                        const bytes = std.mem.toBytes(@as(Int, @bitCast(@field(v, f.name))));
+                        try w.writeAll(&bytes);
+                        i += bytes.len;
+                    } else {
+                        i += try writeBytes(f.type, w, i, @field(v, f.name));
+                    }
+                }
+            },
+            .array => {
+                for (v) |item| {
+                    i += try writeBytes(@TypeOf(item), w, i, item);
+                }
+            },
+            .@"enum" => {
+                const bytes = std.mem.toBytes(@intFromEnum(v));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            .bool => {
+                const bytes = std.mem.toBytes(@as(u32, @intFromBool(v)));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            .float => |float_info| {
+                const bytes = std.mem.toBytes(@as(std.meta.Int(.unsigned, float_info.bits), @bitCast(v)));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            else => {
+                const bytes = std.mem.toBytes(v);
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+        }
+        return i;
+    }
+
+
+    fn writeSwappedBytes(comptime T: type, w: Writer, pos: usize, v: T) !usize {
+        var i = pos;
+        switch (@typeInfo(T)) {
+            .@"struct" => |struct_info| {
+                try w.writeByteNTimes(0x00, TypeSignature.@"struct".alignOffset(i));
+                inline for (struct_info.fields) |f| {
+                    if (struct_info.backing_integer) |Int| {
+                        const bytes = std.mem.toBytes(@byteSwap(@as(Int, @bitCast(@field(v, f.name)))));
+                        try w.writeAll(&bytes);
+                        i += bytes.len;
+                    } else {
+                        i += try writeSwappedBytes(f.type, w, i, @field(v, f.name));
+                    }
+                }
+            },
+            .array => {
+                for (v) |item| {
+                    i += try writeSwappedBytes(@TypeOf(item), w, i, item);
+                }
+            },
+            .@"enum" => {
+                const bytes = std.mem.toBytes(@byteSwap(@intFromEnum(v)));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            .bool => {
+                const bytes = std.mem.toBytes(@byteSwap(@as(u32, @intFromBool(v))));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            .float => |float_info| {
+                const bytes = std.mem.toBytes(@byteSwap(@as(std.meta.Int(.unsigned, float_info.bits), @bitCast(v))));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            .pointer => |p| switch (p.size) {
+                .one => i += try writeSwappedBytes(p.child, w, i, v.*),
+                .slice => {}, // i += try writeBytes([v.len]u8, w, i, v.*),
+                .c, .many => {},
+            },
+            else => {
+                const bytes = std.mem.toBytes(@byteSwap(v));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+        }
+        return i;
+    }
+
+    fn writeLittle(comptime T: type, w: Writer, pos: usize, v: T) !usize {
+        return switch (builtin.target.cpu.arch.endian()) {
+            .little => writeBytes(T, w, pos, v),
+            .big => writeSwappedBytes(T, w, pos, v),
+        };
+    }
+
+    fn writeBig(comptime T: type, w: Writer, pos: usize, v: T) !usize {
+        return switch (builtin.target.cpu.arch.endian()) {
+            .little => writeSwappedBytes(T, w, pos, v),
+            .big => writeBytes(T, w, pos, v),
+        };
+    }
+
+    fn writeBytesWithEndian(comptime T: type, w: Writer, pos: usize, v: T, endianness: Endian) !usize {
+        return switch (endianness) {
+            .little => writeLittle(T, w, pos, v),
+            .big => writeBig(T, w, pos, v),
+        };
+    }
+
     pub fn appendStruct(self: *Self, alloc: Allocator, @"struct": anytype) !void {
         const struct_info = @typeInfo(@TypeOf(@"struct"));
         assert(struct_info == .@"struct");
+        const sig = TypeSignature.fromType(@TypeOf(@"struct"));
 
-        const buf: []u8 = try alloc.alloc(u8, @sizeOf(@TypeOf(@"struct")));
-        var fbs = std.io.fixedBufferStream(buf);
-        const buf_writer = fbs.writer();
+        var buf = ArrayList(u8).init(alloc);
+        const buf_writer = buf.writer();
 
         var struct_values = Values.init(alloc);
-        var n: usize = 0;
-        inline for (struct_info.@"struct".fields) |f| {
+        inline for (@typeInfo(@TypeOf(@"struct")).@"struct".fields) |f| {
             const value = @field(@"struct", f.name);
             try struct_values.appendAnyType(alloc, value);
-            const bytes = std.mem.toBytes(value);
-            n += bytes.len;
-            try buf_writer.writeAll(&bytes);
+            _ = try writeBytesWithEndian(@TypeOf(value), buf_writer.any(), buf.items.len, value, .little);
         }
 
-        try self.append(.{ .type = .@"struct", .inner = .{ .@"struct" = struct_values }, .contained_sig = "", .slice = buf[0..n] });
+        try self.append(.{ .type = .@"struct", .inner = .{ .@"struct" = struct_values }, .contained_sig = sig, .slice = try buf.toOwnedSlice() });
     }
 };
 
