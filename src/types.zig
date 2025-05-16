@@ -26,7 +26,32 @@ pub const TypeSignature = enum(u8) {
     dict_entry = '{', // e
     unix_fd = 'h',
 
-    pub inline fn fromType(T: type) ?[]const u8 {
+    pub inline fn fromType(T: type) @This() {
+        comptime {
+            const sig = @typeInfo(T);
+            return switch (sig) {
+                .void => .null,
+                .null, .optional => @compileError("Invalid type, functions cannot return null"),
+                .bool => .boolean,
+                .int => |i| switch (i.bits) {
+                    0...8 => .byte,
+                    9...16 => if (i.signedness == .unsigned) .uint16 else .int16,
+                    17...32 => if (i.signedness == .unsigned) .uint32 else .int32,
+                    33...64 => if (i.signedness == .unsigned) .uint64 else .int64,
+                    else => @compileError("Invalid int, dbus only supports up to 8, 16, 32, and 64 bit integers"),
+                },
+                .float => |f| blk: {
+                    if (f.bits != 64) @compileError("Invalid float, dbus only supports IEEE 754 floats");
+                    break :blk .double;
+                },
+                .array => .array,
+                .@"struct" => .@"struct",
+                else => .null,
+            };
+        }
+    }
+
+    pub inline fn signatureFromType(T: type) ?[]const u8 {
         comptime {
             const sig = @typeInfo(T);
             return switch (sig) {
@@ -44,11 +69,11 @@ pub const TypeSignature = enum(u8) {
                     if (f.bits != 64) @compileError("Invalid float, dbus only supports IEEE 754 floats");
                     break :blk "d";
                 },
-                .array => |a| "a" ++ fromType(a.child),
+                .array => |a| "a" ++ signatureFromType(a.child).?,
                 .@"struct" => |s| blk: {
                     var fields: []const u8 = "";
                     for (s.fields) |f| {
-                        fields = fields ++ (fromType(f.type) orelse ""); // TODO
+                        fields = fields ++ (signatureFromType(f.type) orelse ""); // TODO
                     }
                     break :blk "(" ++ fields ++ ")";
                 },
@@ -209,7 +234,7 @@ pub const Values = struct {
                 },
                 .c => {},
             },
-            .array => |a| self.values.append(Values.fromSlice(alloc, a.child, &value)),
+            .array => self.appendArray(alloc, value),
             .@"struct" => self.appendStruct(alloc, value),
             .comptime_float => self.values.append(.{}),
             .comptime_int => self.values.append(.{}),
@@ -241,14 +266,44 @@ pub const Values = struct {
     }
 
     pub fn fromSlice(alloc: Allocator, Child: anytype, slice: []const Child) !Values {
-        var array_values = Values.init(alloc);
+        var slice_values = Values.init(alloc);
         for (slice) |item| {
-            try array_values.appendAnyType(alloc, item);
+            try slice_values.appendAnyType(alloc, item);
         }
 
         var values = ArrayList(Value).init(alloc);
-        try values.append(.{ .type = .array, .inner = .{ .array = array_values }, .contained_sig = "" });
+        try values.append(.{ .type = .array, .inner = .{ .array = slice_values }, .contained_sig = "" });
         return .{ .values = values };
+    }
+
+    pub fn fromArray(alloc: Allocator, Child: anytype, array: []const Child) !Values {
+        var array_values = Values.init(alloc);
+        for (array) |item| {
+            try array_values.appendAnyType(alloc, item);
+        }
+        var values = ArrayList(Value).init(alloc);
+        try values.append(.{
+            .type = .array,
+            .inner = .{ .array = array_values },
+            .contained_sig = ""
+        });
+        return .{ .values = values };
+    }
+
+    pub fn appendArray(self: *Self, alloc: Allocator, array: anytype) !void {
+        const array_info = @typeInfo(@TypeOf(array));
+        assert(array_info == .array);
+        const sig = TypeSignature.signatureFromType(@TypeOf(array));
+
+        var array_values = Values.init(alloc);
+        for (array) |item| {
+            try array_values.appendAnyType(alloc, item);
+        }
+        try self.values.append(.{
+            .type = .array,
+            .inner = .{ .array = array_values },
+            .contained_sig = sig,
+        });
     }
 
     fn writeBytes(comptime T: type, w: Writer, pos: usize, v: T) !usize {
@@ -267,6 +322,8 @@ pub const Values = struct {
                 }
             },
             .array => {
+                try w.writeByteNTimes(0x00, TypeSignature.fromType(@TypeOf(v[0])).alignOffset(i));
+                try w.writeInt(u32, @as(u32, v.len), builtin.target.cpu.arch.endian());
                 for (v) |item| {
                     i += try writeBytes(@TypeOf(item), w, i, item);
                 }
@@ -312,6 +369,12 @@ pub const Values = struct {
                 }
             },
             .array => {
+                try w.writeByteNTimes(0x00, TypeSignature.fromType(@TypeOf(v[0])).alignOffset(i));
+                try w.writeInt(
+                    u32,
+                    @as(u32, v.len),
+                    if (builtin.target.cpu.arch.endian() == .little) .big else .little,
+                );
                 for (v) |item| {
                     i += try writeSwappedBytes(@TypeOf(item), w, i, item);
                 }
@@ -369,7 +432,7 @@ pub const Values = struct {
     pub fn appendStruct(self: *Self, alloc: Allocator, @"struct": anytype) !void {
         const struct_info = @typeInfo(@TypeOf(@"struct"));
         assert(struct_info == .@"struct");
-        const sig = TypeSignature.fromType(@TypeOf(@"struct"));
+        const sig = TypeSignature.signatureFromType(@TypeOf(@"struct"));
 
         var buf = ArrayList(u8).init(alloc);
         const buf_writer = buf.writer();
@@ -381,7 +444,12 @@ pub const Values = struct {
             _ = try writeBytesWithEndian(@TypeOf(value), buf_writer.any(), buf.items.len, value, .little);
         }
 
-        try self.append(.{ .type = .@"struct", .inner = .{ .@"struct" = struct_values }, .contained_sig = sig, .slice = try buf.toOwnedSlice() });
+        try self.append(.{
+            .type = .@"struct",
+            .inner = .{ .@"struct" = struct_values },
+            .contained_sig = sig,
+            .slice = try buf.toOwnedSlice()
+        });
     }
 };
 

@@ -126,7 +126,7 @@ pub fn Interface(comptime T: anytype) type {
                         .name = decl.name,
                         .member = dbus_name,
                         .@"fn" = fnGeneric(Fn, decl.name, @field(T, decl.name)),
-                        .return_sig = TypeSignature.fromType(decl_info.@"fn".return_type.?),
+                        .return_sig = TypeSignature.signatureFromType(decl_info.@"fn".return_type.?),
                     };
 
                     kvs[i] = .{ dbus_name, m };
