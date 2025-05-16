@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const builtin = std.builtin;
+const log = std.log;
 const mem = std.mem;
 const meta = std.meta;
 const Allocator = std.mem.Allocator;
@@ -354,7 +355,7 @@ pub const Message = struct {
                     },
                     .@"struct" => {
                         assert(value.slice != null);
-                        std.debug.print("writing struct: {d}\n", .{value.slice.?});
+                        log.debug("writing struct: {d}\n", .{value.slice.?});
                         try buf_writer.writeAll(value.slice.?);
                     },
                     // TODO:

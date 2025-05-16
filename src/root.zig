@@ -43,14 +43,14 @@ const Notifier = struct {
     pub fn notify3(
         _: *@This(),
         _: u8,
-    ) extern struct { a: u32, b: u8, c: extern struct { d: u64, e: bool }, f: [2]u8 } {
-        return .{ .a = 7, .b = 8, .c = .{ .d = 9, .e = true }, .f = [2]u8{1, 2} };
+    ) extern struct { a: u32, b: u8, c: extern struct { d: u64, e: bool }, f: [2]u16 } {
+        return .{ .a = 7, .b = 8, .c = .{ .d = 9, .e = true }, .f = [2]u16{1, 2} };
     }
 
     pub fn notify4(
         _: *@This(),
-        a: extern struct { a: u32, b: u8, c: extern struct { d: u64, e: bool }, f: [2]u8 },
-    ) !void {
+        a: extern struct { a: u32, b: u8, c: extern struct { d: u64, e: bool }, f: [2]u16 },
+    ) void {
         std.debug.print("wtf, {any}\n", .{a.c.e});
     }
 };

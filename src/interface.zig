@@ -193,6 +193,15 @@ pub fn Interface(comptime T: anytype) type {
 
                 fn f(t: *T, bus: *Dbus, msg: *const Message, sig: ?[]const u8) void {
                     comptime validate();
+                    // how does this work? 
+                    const args: *Args = @alignCast(@ptrCast(@constCast(msg.body_buf)));
+                    const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
+                    const ret_info = @typeInfo(ReturnType);
+
+                    log.debug("args: {any}\n", .{args.*});
+
+                    assert(msg.values.?.values.items.len == args.len);
+
                     var resp = Message.init(.{
                         .msg_type = .method_return,
                         .destination = msg.sender,
@@ -201,10 +210,6 @@ pub fn Interface(comptime T: anytype) type {
                         .flags = 0x01,
                         .signature = sig,
                     });
-                    const a = &.{ msg.values.?.values.items[0].inner.byte };
-                    const args: *Args = @alignCast(@ptrCast(@constCast(a)));
-                    const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
-                    const ret_info = @typeInfo(ReturnType);
                     _ = switch (ret_info) {
                         .void => @as(error{}!void, {}),
                         .bool => resp.appendBool(bus.allocator, ret),
@@ -228,11 +233,14 @@ pub fn Interface(comptime T: anytype) type {
                             else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
                         },
                         .@"struct" => resp.appendStruct(bus.allocator, ret),
+                        // ERRORS!!! didn't think to do this
+                        // .error_union => |e| {
+                        //     e.error_set;
+                        // },
                         else => @panic("unsupported return type")
 
                     } catch unreachable;
 
-                    std.debug.print("return sig: {s}\n", .{sig.?});
                     bus.writeMsg(&resp, null) catch log.err("failed to write message", .{});
                 }
             }.f;

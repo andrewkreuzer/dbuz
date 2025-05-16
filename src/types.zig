@@ -321,12 +321,14 @@ pub const Values = struct {
                     }
                 }
             },
-            .array => {
-                try w.writeByteNTimes(0x00, TypeSignature.fromType(@TypeOf(v[0])).alignOffset(i));
-                try w.writeInt(u32, @as(u32, v.len), builtin.target.cpu.arch.endian());
-                for (v) |item| {
-                    i += try writeBytes(@TypeOf(item), w, i, item);
-                }
+            .array => |a| {
+                // @sizeOf(v) isn't going to work with structs
+                try w.writeInt(u32, @as(u32, @sizeOf(@TypeOf(v))), builtin.target.cpu.arch.endian());
+                try w.writeByteNTimes(0x00, TypeSignature.fromType(a.child).alignOffset(i));
+                try w.writeAll(@as([]const u8, @ptrCast(&v)));
+                // for (v) |item| {
+                //     i += try writeBytes(@TypeOf(item), w, i, item);
+                // }
             },
             .@"enum" => {
                 const bytes = std.mem.toBytes(@intFromEnum(v));
