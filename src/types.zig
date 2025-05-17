@@ -168,10 +168,6 @@ pub const Values = struct {
     pub fn deinit(self: *Values, alloc: Allocator) void {
         for (self.values.items) |*value| {
             free(alloc, value);
-            // TODO: don't want to have to allocate these
-            // when generating the message
-            // alloc.free(value.contained_sig);
-            // alloc.free(value.slice);
         }
         self.values.deinit();
     }
@@ -227,10 +223,18 @@ pub const Values = struct {
             .pointer => |p| switch (p.size) {
                 .one => self.appendAnyType(value.*),
                 .many => {},
-                .slice => switch (p.child) {
-                    // TODO: should we assume u8 slices are strings?
-                    u8 => self.append(.{ .type = .string, .inner = .{ .string = String{ .inner = value } } }),
-                    else => self.append(.{ .type = .array, .inner = .{ .array = Values.fromSlice(alloc, p.child, value.*) } }),
+                .slice => blk: {
+                    // TODO: should we assume const u8 slices are strings?
+                    if (p.child == u8 and p.is_const) {
+                        break :blk self.append(.{
+                            .type = .string,
+                            .inner = .{ .string = String{ .inner = value } }
+                        });
+                    }
+                    break :blk self.append(.{
+                        .type = .array,
+                        .inner = .{ .array = Values.fromSlice(alloc, p.child, value.*) }
+                    });
                 },
                 .c => {},
             },

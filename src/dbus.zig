@@ -12,12 +12,12 @@ const xev = @import("xev");
 // just treat it as a TCP socket
 const Unix = xev.TCP;
 
-const message = @import("message.zig");
 const iface = @import("interface.zig");
-const Interface = iface.BusInterface;
-const ReturnPtr = iface.ReturnPtr;
-const Message = message.Message;
+const message = @import("message.zig");
 const Hello = message.Hello;
+const Interface = iface.BusInterface;
+const Message = message.Message;
+const ReturnPtr = iface.ReturnPtr;
 const Value = message.Value;
 
 pub const Dbus = struct {
@@ -41,7 +41,7 @@ pub const Dbus = struct {
     server_address: ?[]const u8 = undefined,
 
     interfaces: StringHashMap(Interface) = undefined,
-    read_callback: ?*const fn (bus: *Dbus, msg: Message) void = null,
+    read_callback: ?*const fn (bus: *Dbus, msg: *Message) void = null,
     write_callback: ?*const fn (bus: *Dbus) void = null,
 
     const State = enum {
@@ -55,7 +55,7 @@ pub const Dbus = struct {
 
     pub fn init(allocator: Allocator) !Dbus {
         var thread_pool = xev.ThreadPool.init(.{
-            .max_threads = 3,
+            .max_threads = 16,
         });
         const uid = std.os.linux.getuid();
         return .{
@@ -74,8 +74,12 @@ pub const Dbus = struct {
 
     pub fn deinit(bus: *Dbus) void {
         if (bus.name) |name| bus.allocator.free(name);
-        bus.thread_pool.deinit();
+        bus.loop.stop();
+        bus.loop.deinit();
         bus.thread_pool.shutdown();
+        bus.thread_pool.deinit();
+        bus.interfaces.deinit();
+        log.info("dbuz has been shutdown", .{});
     }
 
     pub fn bind(bus: *Dbus, name: []const u8, interface: Interface) void {
@@ -376,7 +380,7 @@ pub const Dbus = struct {
             };
             defer msg.deinit(bus.allocator);
 
-            if (bus.read_callback) |cb| cb(bus, msg);
+            if (bus.read_callback) |cb| cb(bus, &msg);
 
             if (msg.interface == null) continue;
             if (msg.member == null) continue;

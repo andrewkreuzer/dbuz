@@ -25,7 +25,7 @@ const Notifier = struct {
 
     pub fn notify(
         _: *@This(),
-    ) error{UnfinishedBusiness}!u8 {
+    ) !u8 {
         const path: ObjectPath = .{ .inner = "/net/anunknownalias/Dbuz" };
         std.debug.print("some stuff, {s}\n", .{path.inner});
         return error.UnfinishedBusiness;
@@ -49,16 +49,13 @@ const Notifier = struct {
 
     pub fn notify4(
         _: *@This(),
-        a: extern struct { a: u32, b: u8, c: extern struct { d: u64, e: bool }, f: [2]u16 },
+        a: extern struct { a: u32, b: u8, c: extern struct { d: u64, e: bool }, f: [2]extern struct{ g: u16, h: u64 } },
     ) void {
         assert(a.c.e);
     }
 };
 
 pub fn run() !void {
-    var loop = try xev.Loop.init(.{});
-    defer loop.deinit();
-
     const GPA = std.heap.GeneralPurposeAllocator(.{});
     var gpa: GPA = .{};
     defer _ = gpa.deinit();
@@ -66,6 +63,24 @@ pub fn run() !void {
 
     var dbus = try Dbus.init(allocator);
     defer dbus.deinit();
+
+    dbus.read_callback = struct { 
+        fn f(bus: *Dbus, msg: *Message) void {
+            if (msg.member) |member| {
+                if (std.mem.eql(u8, member, "Shutdown")) {
+                    var shutdown_msg = Message.init(.{
+                        .msg_type = .method_return,
+                        .destination = msg.sender,
+                        .sender = msg.destination,
+                        .reply_serial = msg.header.serial,
+                        .flags = 0x01,
+                    });
+                    bus.writeMsg(&shutdown_msg, null) catch std.posix.exit(1);
+                    bus.shutdown();
+                }
+            }
+        }
+    }.f;
 
     var notifier: Notifier = .{};
     const notifier_iface = Interface(Notifier).init(&notifier);
@@ -79,21 +94,8 @@ pub fn run() !void {
     const end_time = try Instant.now();
 
     const elapsed = @as(f64, @floatFromInt(end_time.since(start_time)));
-    std.log.info("{d:.2} seconds", .{elapsed / 1e9});
+    std.log.info("total time {d:.2} seconds", .{elapsed / 1e9});
 }
-
-// fn methodReturnCallback(
-//     _: *Dbus,
-//     msg: Message,
-// ) void {
-//     switch (msg.values.?.values.items[0].inner.uint32) {
-//         0x01 => std.log.debug("name request succeded", .{}),
-//         0x02 => std.log.debug("name request in queue", .{}),
-//         0x03 => std.log.debug("name owned by another service", .{}),
-//         0x04 => std.log.debug("name request already owned by this service", .{}),
-//         else => unreachable,
-//     }
-// }
 
 test {
     _ = @import("message.zig");

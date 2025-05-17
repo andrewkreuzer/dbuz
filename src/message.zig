@@ -3,7 +3,6 @@ const assert = std.debug.assert;
 const builtin = std.builtin;
 const log = std.log;
 const mem = std.mem;
-const meta = std.meta;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
@@ -126,6 +125,7 @@ pub const Message = struct {
         T: TypeSignature,
         value: []const u8
     ) !void {
+        assert(@TypeOf(value) == []const u8);
         var values = self.values orelse Values.init(alloc);
         const v: Value = switch (T) {
             .string => .{ .type = T, .inner = .{ .string = .{ .inner = value } } },
@@ -144,7 +144,7 @@ pub const Message = struct {
     ) !void {
         var values = self.values orelse Values.init(alloc);
 
-        const v: ?Value = switch (@TypeOf(value)) {
+        const v: Value = switch (@TypeOf(value)) {
             u8 => .{ .type = .byte, .inner = .{ .byte = value }},
             u16 => .{ .type = .uint16, .inner = .{ .uint16 = value }},
             i16 => .{ .type = .int16, .inner = .{ .int16 = value }},
@@ -155,13 +155,11 @@ pub const Message = struct {
             f64 => .{ .type = .double, .inner = .{ .double = value }},
             comptime_int, comptime_float =>
                 @compileError("numbers passed to appendNumber must be given an explicit fixed-size number type"),
-            else => null,
+            else =>
+                @compileError("expected number type got" ++ @typeName(@TypeOf(value))),
         };
-        if (v == null) {
-            std.log.debug("invalid type: {any}", .{@TypeOf(value)});
-            return error.InvalidIntType;
-        }
-        try values.append(v.?);
+
+        try values.append(v);
         self.values = values;
     }
 
@@ -170,6 +168,7 @@ pub const Message = struct {
         alloc: Allocator,
         value: bool
     ) !void {
+        assert(@TypeOf(value) == bool);
         var values = self.values orelse Values.init(alloc);
         const v: Value = .{ .type = .boolean, .inner = .{ .boolean = value } };
         try values.append(v);
@@ -261,6 +260,7 @@ pub const Message = struct {
 
             if (self.error_name) |error_name| {
                 var err_buf: [256]u8 = undefined;
+                // TODO: get interface from dbus
                 const err = try std.fmt.bufPrint(&err_buf, "com.anunknownalias.Error.{s}", .{error_name});
                 try writeFieldString(.error_name, .string, err, buf.items.len, buf_writer);
                 size = buf.items.len;

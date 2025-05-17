@@ -4,19 +4,17 @@ const builtin = std.builtin;
 const log = std.log;
 const mem = std.mem;
 const meta = std.meta;
-const activeTag = meta.activeTag;
 const toUpper = std.ascii.toUpper;
-const Allocator = std.mem.Allocator;
 const StaticStringMap = std.StaticStringMap;
-const Type = builtin.Type;
 const Tuple = meta.Tuple;
+const Type = builtin.Type;
 
 const xev = @import("xev");
 
 const Dbus = @import("dbus.zig").Dbus;
 const Message = @import("message.zig").Message;
-const Values = @import("types.zig").Values;
 const TypeSignature = @import("types.zig").TypeSignature;
+const Values = @import("types.zig").Values;
 
 pub const BusInterface = struct {
     ptr: *const anyopaque,
@@ -142,6 +140,9 @@ pub fn Interface(comptime T: anytype) type {
             comptime {
                 var param_list: [params.len - 1]type = undefined;
                 for (params[1..], 0..) |param, i| {
+                    if (param.type == null) @compileError("invalid parameter type");
+                    const param_info = @typeInfo(param.type.?);
+                    _ = param_info;
                     param_list[i] = param.type.?;
                 }
                 return Tuple(&param_list);
@@ -222,7 +223,7 @@ pub fn Interface(comptime T: anytype) type {
                                 msg.header.msg_type = .@"error";
                                 msg.error_name = @errorName(ret);
                                 msg.signature = "s";
-                                break :blk msg.appendString(bus.allocator, .string, "we've had an error");
+                                break :blk msg.appendString(bus.allocator, .string, @errorName(ret));
                             } else @panic("error_set must be set");
                         },
                         else => @panic("unsupported return type")
@@ -232,8 +233,6 @@ pub fn Interface(comptime T: anytype) type {
 
                 fn f(t: *T, bus: *Dbus, msg: *const Message, sig: ?[]const u8) void {
                     comptime validate();
-                    // how does this work?
-                    // ya args with u8, u16, u8 breaks it
                     const args: *Args = @alignCast(@ptrCast(@constCast(msg.body_buf)));
                     const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
 
