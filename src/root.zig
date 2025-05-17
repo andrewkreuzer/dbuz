@@ -25,19 +25,19 @@ const Notifier = struct {
 
     pub fn notify(
         _: *@This(),
-    ) u8 {
+    ) error{UnfinishedBusiness}!u8 {
         const path: ObjectPath = .{ .inner = "/net/anunknownalias/Dbuz" };
         std.debug.print("some stuff, {s}\n", .{path.inner});
-        return 2;
+        return error.UnfinishedBusiness;
     }
 
     pub fn notify2(
         _: *@This(),
-        _: u8,
-        _: u8,
+        a: u8,
+        b: u16,
+        c: u8,
     ) void {
-        const path: ObjectPath = .{ .inner = "/net/anunknownalias/Dbuz" };
-        std.debug.print("some stuff, {s}\n", .{path.inner});
+        std.debug.print("a: {d}, b: {d}, c: {d}\n", .{a, b, c});
     }
 
     pub fn notify3(
@@ -51,7 +51,7 @@ const Notifier = struct {
         _: *@This(),
         a: extern struct { a: u32, b: u8, c: extern struct { d: u64, e: bool }, f: [2]u16 },
     ) void {
-        std.debug.print("wtf, {any}\n", .{a.c.e});
+        assert(a.c.e);
     }
 };
 

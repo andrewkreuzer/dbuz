@@ -22,6 +22,7 @@ const Value = message.Value;
 
 pub const Dbus = struct {
     loop: xev.Loop,
+    thread_pool: xev.ThreadPool,
     read_completion: xev.Completion = undefined,
     write_completion: xev.Completion = undefined,
 
@@ -53,9 +54,15 @@ pub const Dbus = struct {
     };
 
     pub fn init(allocator: Allocator) !Dbus {
+        var thread_pool = xev.ThreadPool.init(.{
+            .max_threads = 3,
+        });
         const uid = std.os.linux.getuid();
         return .{
-            .loop = try xev.Loop.init(.{}),
+            .loop = try xev.Loop.init(.{
+                .thread_pool = &thread_pool,
+            }),
+            .thread_pool = thread_pool,
             .path = defaultSocketPath(uid),
             .state = .disconnected,
             .allocator = allocator,
@@ -67,6 +74,8 @@ pub const Dbus = struct {
 
     pub fn deinit(bus: *Dbus) void {
         if (bus.name) |name| bus.allocator.free(name);
+        bus.thread_pool.deinit();
+        bus.thread_pool.shutdown();
     }
 
     pub fn bind(bus: *Dbus, name: []const u8, interface: Interface) void {
@@ -286,7 +295,7 @@ pub const Dbus = struct {
         log.info("requesting name: {s}", .{name});
         var msg = message.RequestName;
         try msg.appendString(bus.allocator, .string, name);
-        try msg.appendInt(bus.allocator, .uint32, 1);
+        try msg.appendNumber(bus.allocator, @as(u32, 1));
 
         var c: xev.Completion = undefined;
         try bus.writeMsg(&msg, &c);

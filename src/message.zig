@@ -64,7 +64,7 @@ pub const Message = struct {
     /// member (method or signal) to call
     member: ?[]const u8 = null,
 
-    /// name of the error is one occurred
+    /// name of the error if one occurred
     error_name: ?[]const u8 = null,
 
     /// serial this message is a reply to
@@ -137,34 +137,24 @@ pub const Message = struct {
         self.values = values;
     }
 
-    pub fn appendInt(
+    pub fn appendNumber(
         self: *Self,
         alloc: Allocator,
-        T: TypeSignature,
         value: anytype
     ) !void {
         var values = self.values orelse Values.init(alloc);
 
         const v: ?Value = switch (@TypeOf(value)) {
-            u8 => if (T == .byte) .{ .type = T, .inner = .{ .byte = value }} else null,
-            u16 => if (T == .uint16) .{ .type = T, .inner = .{ .uint16 = value }} else null,
-            i16 => if (T == .int16) .{ .type = T, .inner = .{ .int16 = value }} else null,
-            u32 => if (T == .uint32) .{ .type = T, .inner = .{ .uint32 = value }} else null,
-            i32 => if (T == .int32) .{ .type = T, .inner = .{ .int32 = value }} else null,
-            u64 => if (T == .uint64) .{ .type = T, .inner = .{ .uint64 = value }} else null,
-            i64 => if (T == .int64) .{ .type = T, .inner = .{ .int64 = value }} else null,
-            f64 => if (T == .double) .{ .type = T, .inner = .{ .double = value }} else null,
-            comptime_int, comptime_float => switch (T) {
-                .byte => .{ .type = T, .inner = .{ .byte = @as(u8, @intCast(value)) }},
-                .uint16 => .{ .type = T, .inner = .{ .uint16 = @as(u16, @intCast(value)) }},
-                .int16 => .{ .type = T, .inner = .{ .int16 = @as(i16, @intCast(value)) }},
-                .uint32 => .{ .type = T, .inner = .{ .uint32 = @as(u32, @intCast(value)) }},
-                .int32 => .{ .type = T, .inner = .{ .int32 = @as(i32, @intCast(value)) }},
-                .uint64 => .{ .type = T, .inner = .{ .uint64 = @as(u64, @intCast(value)) }},
-                .int64 => .{ .type = T, .inner = .{ .int64 = @as(i64, @intCast(value)) }},
-                .double => .{ .type = T, .inner = .{ .double = value }},
-                else => null,
-            },
+            u8 => .{ .type = .byte, .inner = .{ .byte = value }},
+            u16 => .{ .type = .uint16, .inner = .{ .uint16 = value }},
+            i16 => .{ .type = .int16, .inner = .{ .int16 = value }},
+            u32 => .{ .type = .uint32, .inner = .{ .uint32 = value }},
+            i32 => .{ .type = .int32, .inner = .{ .int32 = value }},
+            u64 => .{ .type = .uint64, .inner = .{ .uint64 = value }},
+            i64 => .{ .type = .int64, .inner = .{ .int64 = value }},
+            f64 => .{ .type = .double, .inner = .{ .double = value }},
+            comptime_int, comptime_float =>
+                @compileError("numbers passed to appendNumber must be given an explicit fixed-size number type"),
             else => null,
         };
         if (v == null) {
@@ -270,7 +260,9 @@ pub const Message = struct {
             }
 
             if (self.error_name) |error_name| {
-                try writeFieldString(.error_name, .string, error_name, buf.items.len, buf_writer);
+                var err_buf: [256]u8 = undefined;
+                const err = try std.fmt.bufPrint(&err_buf, "com.anunknownalias.Error.{s}", .{error_name});
+                try writeFieldString(.error_name, .string, err, buf.items.len, buf_writer);
                 size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);
@@ -380,7 +372,7 @@ pub const Message = struct {
         const v = iter.next(.variant, null) orelse return error.EOF;
         const t: TypeSignature = @enumFromInt(v[0]);
         if (t != type_) {
-            std.debug.print("invalid type: {any}\n", .{t});
+            log.debug("invalid type: {any}\n", .{t});
             return error.InvalidField;
         }
 

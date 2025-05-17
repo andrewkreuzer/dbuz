@@ -179,11 +179,6 @@ pub fn Interface(comptime T: anytype) type {
                         @compileError("expected tuple or struct argument, found " ++ @typeName(Args));
                     }
 
-                    // TODO
-                    // this only checks the created arg type vs the function's parameters
-                    // a better check would be to compare the count of arguments passed in
-                    // from call but with the cast to anyopaque it's not easy,
-                    // could pass an arg count and check at runtime I guess?
                     if (args_fields_info.len + 1 != fn_params.len) {
                         @compileError("missmatch number of arguments, expected " ++
                             std.fmt.comptimePrint("{d}", .{fn_params.len}) ++
@@ -191,18 +186,62 @@ pub fn Interface(comptime T: anytype) type {
                     }
                 }
 
+                fn appendReturnValue(R: type, ret: R, bus: *Dbus, msg: *Message) !void {
+                    const ret_info = @typeInfo(R);
+                    _ = switch (ret_info) {
+                        .void => @as(error{}!void, {}),
+                        .bool => msg.appendBool(bus.allocator, ret),
+                        .int => |i| switch (i.bits) {
+                            0...8 => msg.appendNumber(bus.allocator, @as(u8, ret)),
+                            9...16 => msg.appendNumber(
+                                bus.allocator,
+                                if (i.signedness == .signed) @as(i16, ret)
+                                else @as(u16, ret)
+                            ),
+                            17...32 => msg.appendNumber(
+                                bus.allocator,
+                                if (i.signedness == .signed) @as(i32, ret)
+                                else @as(u32, ret)
+                            ),
+                            33...64 => msg.appendNumber(
+                                bus.allocator,
+                                if (i.signedness == .signed) @as(i64, ret)
+                                else @as(u64, ret)
+                            ),
+                            else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
+                        },
+                        .@"struct" => msg.appendStruct(bus.allocator, ret),
+                        .error_union => |e| blk: {
+                            const r = ret catch |err| {
+                                break :blk appendReturnValue(e.error_set, err, bus, msg);
+                            };
+                            break :blk appendReturnValue(R, r, bus, msg);
+                        },
+                        .error_set => |eset| blk: {
+                            if (eset) |_| {
+                                msg.header.msg_type = .@"error";
+                                msg.error_name = @errorName(ret);
+                                msg.signature = "s";
+                                break :blk msg.appendString(bus.allocator, .string, "we've had an error");
+                            } else @panic("error_set must be set");
+                        },
+                        else => @panic("unsupported return type")
+
+                    } catch @panic("failed to append return value to msgonse message");
+                }
+
                 fn f(t: *T, bus: *Dbus, msg: *const Message, sig: ?[]const u8) void {
                     comptime validate();
-                    // how does this work? 
+                    // how does this work?
+                    // ya args with u8, u16, u8 breaks it
                     const args: *Args = @alignCast(@ptrCast(@constCast(msg.body_buf)));
                     const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
-                    const ret_info = @typeInfo(ReturnType);
 
-                    log.debug("args: {any}\n", .{args.*});
+                    if (msg.values) |values| {
+                        assert(values.values.items.len == args.len);
+                    }
 
-                    assert(msg.values.?.values.items.len == args.len);
-
-                    var resp = Message.init(.{
+                    var return_msg = Message.init(.{
                         .msg_type = .method_return,
                         .destination = msg.sender,
                         .sender = msg.destination,
@@ -210,38 +249,11 @@ pub fn Interface(comptime T: anytype) type {
                         .flags = 0x01,
                         .signature = sig,
                     });
-                    _ = switch (ret_info) {
-                        .void => @as(error{}!void, {}),
-                        .bool => resp.appendBool(bus.allocator, ret),
-                        .int => |i| switch (i.bits) {
-                            0...8 => resp.appendInt(bus.allocator, .byte, @as(u8, ret)),
-                            9...16 => resp.appendInt(
-                                bus.allocator,
-                                if (i.signedness == .signed) .int16 else .uint16,
-                                if (i.signedness == .signed) @as(i16, ret) else @as(u16, ret),
-                            ),
-                            17...32 => resp.appendInt(
-                                bus.allocator,
-                                if (i.signedness == .signed) .int32 else .uint32,
-                                if (i.signedness == .signed) @as(i32, ret) else @as(u32, ret),
-                            ),
-                            33...64 => resp.appendInt(
-                                bus.allocator,
-                                if (i.signedness == .signed) .int64 else .uint64,
-                                if (i.signedness == .signed) @as(i64, ret) else @as(u64, ret),
-                            ),
-                            else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
-                        },
-                        .@"struct" => resp.appendStruct(bus.allocator, ret),
-                        // ERRORS!!! didn't think to do this
-                        // .error_union => |e| {
-                        //     e.error_set;
-                        // },
-                        else => @panic("unsupported return type")
+                    appendReturnValue(ReturnType, ret, bus, &return_msg) catch {
+                        log.err("failed to append return value", .{});
+                    };
 
-                    } catch unreachable;
-
-                    bus.writeMsg(&resp, null) catch log.err("failed to write message", .{});
+                    bus.writeMsg(&return_msg, null) catch log.err("failed to write message", .{});
                 }
             }.f;
         }
