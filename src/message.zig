@@ -540,8 +540,37 @@ pub const Message = struct {
         _ = try parseBytes(alloc, self.signature.?, &bytes_iter, &self.values.?);
     }
 
+    fn swapEndian(
+        value: u32,
+        endian: Endian,
+    ) u32 {
+        if (endian.isSystemEndian()) return value;
+        return @byteSwap(value);
+    }
+
     pub fn decode(alloc: Allocator, reader: anytype) !Self {
-        const header = try reader.readStruct(Header);
+        var header: Header = reader.readStruct(Header) catch {
+            return error.InvalidHeader;
+        };
+
+        if (header.endian != .little and header.endian != .big)
+            return error.InvalidEndian;
+
+        if (header.msg_type == .invalid)
+            return error.InvalidMessageType;
+
+        if (header.protocol_version != 1 and header.protocol_version != 2)
+            return error.InvalidProtocolVersion;
+
+        if (header.serial == 0)
+            return error.InvalidSerial;
+
+        if (header.fields_len == 0)
+            return error.InvalidFields;
+
+        header.fields_len = swapEndian(header.fields_len, header.endian);
+        header.body_len = swapEndian(header.body_len, header.endian);
+
         var message: Self = .{ .header = header };
 
         message.fields_buf = try alloc.alloc(u8, message.header.fields_len);
@@ -582,6 +611,14 @@ pub const Message = struct {
 const Endian = enum(u8) {
     little = 'l',
     big = 'B',
+
+    pub fn isSystemEndian(self: Endian) bool {
+        const sysEndian = @import("builtin").cpu.arch.endian();
+        return switch (self) {
+            .little => sysEndian == .little,
+            .big => sysEndian == .big,
+        };
+    }
 };
 
 const MessageType = enum(u8) {
@@ -593,7 +630,7 @@ const MessageType = enum(u8) {
 };
 
 const Header = packed struct {
-    endian: u8,
+    endian: Endian,
     msg_type: MessageType,
     flags: u8,
     protocol_version: u8,
@@ -603,7 +640,7 @@ const Header = packed struct {
 
     pub fn init(opts: MsgOptions) @This() {
         return .{
-            .endian = @intFromEnum(opts.endian),
+            .endian = opts.endian,
             .msg_type = opts.msg_type,
             .flags = opts.flags,
             .protocol_version = 1,
