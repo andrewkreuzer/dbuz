@@ -20,29 +20,40 @@ const Message = message.Message;
 const ReturnPtr = iface.ReturnPtr;
 const Value = message.Value;
 
+const BufferPool = MemoryPool([4096]u8);
+const CompletionPool = MemoryPool(xev.Completion);
+const WriteRequestPool = MemoryPool(xev.WriteRequest);
+
 pub const Dbus = struct {
-    loop: xev.Loop,
-    thread_pool: xev.ThreadPool,
-    read_completion: xev.Completion = undefined,
-    write_completion: xev.Completion = undefined,
-
-    socket: ?Unix = null,
-    path: []const u8,
-
-    allocator: Allocator,
-    read_buf: [1024]u8 = undefined,
-    write_buf: [1024]u8 = undefined,
-    message_pool: MemoryPool(Message) = undefined,
-
-    state: State,
-
     uid: u32 = 0,
     name: ?[]const u8 = null,
     server_address: ?[]const u8 = undefined,
 
+    loop: xev.Loop,
+    thread_pool: xev.ThreadPool,
+    completion_pool: CompletionPool,
+    write_queue: xev.WriteQueue = .{},
+    write_request_pool: WriteRequestPool,
+
+    socket: ?Unix = null,
+    path: []const u8,
+    msg_serial: u32 = 1,
+
+    allocator: Allocator,
+    read_buffer_pool: BufferPool,
+    write_buffer_pool: BufferPool,
+
+    state: State,
+
     interfaces: StringHashMap(Interface) = undefined,
     read_callback: ?*const fn (bus: *Dbus, msg: *Message) void = null,
     write_callback: ?*const fn (bus: *Dbus) void = null,
+
+    stats: ?Stats = null,
+    stats_loop: ?xev.Loop = null,
+    stats_timer: ?xev.Timer = null,
+    stats_completion: ?xev.Completion = null,
+    stats_completion_cancel: ?xev.Completion = null,
 
     const State = enum {
         disconnected,
@@ -53,22 +64,57 @@ pub const Dbus = struct {
         ready,
     };
 
-    pub fn init(allocator: Allocator) !Dbus {
-        var thread_pool = xev.ThreadPool.init(.{
-            .max_threads = 16,
-        });
-        const uid = std.os.linux.getuid();
+    const Stats = struct {
+        read: u64 = 0,
+        write: u64 = 0,
+        errors: u64 = 0,
+
+        fn clear(s: *Stats) void {
+            s.read = 0;
+            s.write = 0;
+            s.errors = 0;
+        }
+    };
+
+    pub fn init(allocator: Allocator, stats: bool) !Dbus {
+        const uid = blk: {
+            const u = std.os.linux.getuid();
+            if (u == 0) {
+                // we are root, so we need to drop
+                // privileges to connect
+                try std.posix.setuid(1000);
+                break :blk 1000;
+            } else {
+                break :blk u;
+            }
+        };
+
+        // io_uring doesn't need a thread pool,
+        // but we'll add one for other backends
+        var thread_pool = xev.ThreadPool.init(.{});
+
         return .{
+            .uid = uid,
             .loop = try xev.Loop.init(.{
                 .thread_pool = &thread_pool,
+                .entries = std.math.pow(u13, 2, 12),
             }),
             .thread_pool = thread_pool,
+            .completion_pool = CompletionPool.init(allocator),
+            .write_request_pool = WriteRequestPool.init(allocator),
             .path = defaultSocketPath(uid),
-            .state = .disconnected,
             .allocator = allocator,
-            .message_pool = MemoryPool(Message).init(allocator),
-            .uid = uid,
+            .write_buffer_pool = BufferPool.init(allocator),
+            .read_buffer_pool = BufferPool.init(allocator),
+            .state = .disconnected,
             .interfaces = StringHashMap(Interface).init(allocator),
+            .stats = if (stats) .{} else null,
+            .stats_loop = if (stats) try xev.Loop.init(.{
+                .thread_pool = &thread_pool,
+            }) else null,
+            .stats_timer = if (stats) try xev.Timer.init() else null,
+            .stats_completion = if (stats) .{} else null,
+            .stats_completion_cancel = if (stats) .{} else null,
         };
     }
 
@@ -79,6 +125,14 @@ pub const Dbus = struct {
         bus.thread_pool.shutdown();
         bus.thread_pool.deinit();
         bus.interfaces.deinit();
+        bus.write_request_pool.deinit();
+        bus.write_buffer_pool.deinit();
+        bus.read_buffer_pool.deinit();
+        bus.completion_pool.deinit();
+        if (bus.stats) |_| {
+            bus.stats_loop.?.stop();
+            bus.stats_loop.?.deinit();
+        }
         log.info("dbuz has been shutdown", .{});
     }
 
@@ -104,13 +158,52 @@ pub const Dbus = struct {
         };
     }
 
-    pub fn start(bus: *Dbus) !void {
+    pub fn startClient(bus: *Dbus) !void {
+        try bus.connect();
+        try bus.authenticate();
+        try bus.hello();
+    }
+
+    pub fn startServer(bus: *Dbus) !void {
         try bus.connect();
         try bus.authenticate();
         try bus.hello();
         try bus.requestBoundNames();
         bus.read(null, null);
+        if (bus.stats) |_| bus.startStats();
     }
+
+    fn startStats(bus: *Dbus) void {
+        bus.stats_timer.?.run(&bus.loop, &bus.stats_completion.?, 500, Dbus, bus, onStats);
+    }
+
+    fn onStats(
+        bus_: ?*Dbus,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        r: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        _ = r catch unreachable;
+        var bus = bus_.?;
+        const read_ps = @as(f64, @floatFromInt(bus.stats.?.read)) / 10;
+        const write_ps = @as(f64, @floatFromInt(bus.stats.?.write)) / 10;
+        const errors_ps = @as(f64, @floatFromInt(bus.stats.?.errors)) / 10;
+        bus.stats.?.clear();
+        log.info("dbus stats: read: {d}, write: {d}, error: {d}", .{read_ps, write_ps, errors_ps});
+
+        bus.stats_timer.?.reset(
+            &bus.loop,
+            &bus.stats_completion.?,
+            &bus.stats_completion_cancel.?,
+            10000,
+            Dbus,
+            bus,
+            onStats
+        );
+
+        return .disarm;
+    }
+
 
     pub fn run(bus: *Dbus, mode: xev.RunMode) !void {
         try bus.loop.run(mode);
@@ -121,7 +214,7 @@ pub const Dbus = struct {
         bus.socket = try Unix.init(addr);
 
         assert(bus.socket != null);
-        assert(bus.socket.?.fd != -1);
+        if (!xev.dynamic) assert(bus.socket.?.fd != -1);
         assert(bus.state == .disconnected);
         bus.state = .connecting;
 
@@ -146,19 +239,18 @@ pub const Dbus = struct {
 
         assert(bus.socket != null);
         assert(bus.state == .connecting);
-
         bus.state = .connected;
+
         return .disarm;
     }
 
     pub fn authenticate(bus: *Dbus) !void {
         assert(bus.socket != null);
         assert(bus.state == .connected);
-
         bus.state = .authenticating;
-        var c: xev.Completion = undefined;
+
         const msg = "\x00AUTH EXTERNAL 31303030\r\n";
-        bus.write(msg, &c, onAuthWrite);
+        bus.write(msg, onAuthWrite);
         try bus.loop.run(.until_done);
     }
 
@@ -172,7 +264,7 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         const bus = bus_.?;
         _ = r catch |err| {
-            log.err("client write err: {any}", .{err});
+            log.err("client auth write err: {any}", .{err});
             socket.shutdown(l, c, Dbus, bus, onShutdown);
             return .disarm;
         };
@@ -195,45 +287,58 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         const bus = bus_.?;
         const n = r catch |err| {
-            log.err("client read err: {any}", .{err});
+            log.err("client auth read err: {any}", .{err});
             return .disarm;
         };
 
         const slice = b.slice[0..n];
 
         if (bus.state != .authenticating) {
-            log.err("client read unexpected state: {any}", .{bus.state});
+            log.err("client auth read unexpected state: {any}", .{bus.state});
             socket.shutdown(l, c, Dbus, bus, onShutdown);
             return .disarm;
         }
 
         var iter = std.mem.splitScalar(u8, slice, ' ');
-        const ok = iter.first();
-        if (!std.mem.eql(u8, ok, "OK")) {
-            log.err("client read unexpected: {s}", .{slice});
+        const ok = ok: {
+            const first = iter.first();
+            if (std.mem.eql(u8, first, "OK")) {
+                break :ok true;
+            } else if (std.mem.eql(u8, first, "REJECTED")) {
+                break :ok false;
+            } else {
+                log.err("client auth error: {s}", .{slice});
+                socket.shutdown(l, c, Dbus, bus, onShutdown);
+                return .disarm;
+            }
+        };
+
+        if (!ok) {
+            log.err("client auth rejected: {s}", .{slice});
             socket.shutdown(l, c, Dbus, bus, onShutdown);
             return .disarm;
         }
 
         bus.server_address = iter.next() orelse unreachable;
-
         bus.state = .authenticated;
-        bus.write("BEGIN\r\n", c, onAuthWrite);
+        bus.write("BEGIN\r\n", onAuthWrite);
         return .disarm;
     }
 
     pub fn hello(bus: *Dbus) !void {
         assert(bus.state == .authenticated);
         var msg = Hello;
-        var fbs = std.io.fixedBufferStream(&bus.write_buf);
-        const writer = fbs.writer();
-
-        try msg.encode(bus.allocator, writer);
         defer msg.deinit(bus.allocator);
-        const bytes = fbs.getWritten();
 
-        var c: xev.Completion = undefined;
-        bus.write(bytes, &c, onHelloWrite);
+        msg.header.serial = bus.msg_serial;
+        bus.msg_serial += 1;
+
+        var buf: [1024]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buf);
+        const writer = fbs.writer();
+        try msg.encode(bus.allocator, writer);
+
+        bus.write(fbs.getWritten(), onHelloWrite);
         try bus.loop.run(.until_done);
     }
 
@@ -247,10 +352,11 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         const bus = bus_.?;
         _ = r catch |err| {
-            log.err("client write err: {any}", .{err});
+            log.err("client hello write err: {any}", .{err});
             socket.shutdown(l, c, Dbus, bus, onShutdown);
             return .disarm;
         };
+
         bus.read(c, onHelloRead);
         return .disarm;
     }
@@ -260,16 +366,16 @@ pub const Dbus = struct {
         l: *xev.Loop,
         c: *xev.Completion,
         socket: Unix,
-        _: xev.ReadBuffer,
+        b: xev.ReadBuffer,
         r: xev.ReadError!usize,
     ) xev.CallbackAction {
         var bus = bus_.?;
-        _ = r catch |err| {
-            log.err("client read err: {any}", .{err});
+        const n = r catch |err| {
+            log.err("client hello read err: {any}", .{err});
             return .disarm;
         };
 
-        var fbs = std.io.fixedBufferStream(&bus.read_buf);
+        var fbs = std.io.fixedBufferStream(b.slice[0..n]);
         const reader = fbs.reader();
         var msg = Message.decode(bus.allocator, reader) catch {
             socket.shutdown(l, c, Dbus, bus, onShutdown);
@@ -298,26 +404,29 @@ pub const Dbus = struct {
     pub fn requestName(bus: *Dbus, name: []const u8) !void {
         log.info("requesting name: {s}", .{name});
         var msg = message.RequestName;
+        defer msg.deinit(bus.allocator);
         try msg.appendString(bus.allocator, .string, name);
         try msg.appendNumber(bus.allocator, @as(u32, 1));
 
-        var c: xev.Completion = undefined;
-        try bus.writeMsg(&msg, &c);
+        try bus.writeMsg(&msg);
         try bus.loop.run(.once);
     }
 
-    pub fn writeMsg(bus: *Dbus, msg: *Message, c: ?*xev.Completion) !void {
-        var fbs = std.io.fixedBufferStream(&bus.write_buf);
+    pub fn writeMsg(bus: *Dbus, msg: *Message) !void {
+        msg.header.serial = bus.msg_serial;
+        bus.msg_serial += 1;
+
+        const buf = try bus.write_buffer_pool.create();
+        var fbs = std.io.fixedBufferStream(buf);
         const writer = fbs.writer();
 
         try msg.encode(bus.allocator, writer);
-        defer msg.deinit(bus.allocator);
 
         const bytes = fbs.getWritten();
-        bus.write(bytes, c, null);
+        bus.write(bytes, null);
     }
 
-    fn read(
+    pub fn read(
         bus: *Dbus,
         c: ?*xev.Completion,
         cb: ?fn(
@@ -342,10 +451,12 @@ pub const Dbus = struct {
             > comptime @intFromEnum(State.connected)
         );
 
+        const buf = bus.read_buffer_pool.create() catch unreachable;
+        const c_ = c orelse bus.completion_pool.create() catch unreachable;
         bus.socket.?.read(
             &bus.loop,
-            c orelse &bus.read_completion,
-            .{ .slice = &bus.read_buf },
+            c_,
+            .{ .slice = buf },
             Dbus,
             bus,
             cb orelse onRead,
@@ -362,20 +473,30 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         const bus = bus_.?;
         const n = r catch |err| switch (err) {
-            error.EOF => return .rearm, // TODO
+            error.EOF => return .disarm,
             else => {
                 log.err("client read err: {any}", .{err});
                 return .disarm;
             }
         };
 
+        const minMsgSize = @sizeOf(message.Header);
+        if (n < minMsgSize) {
+            log.err("client read: to few bytes {d}/{d} of minimum message size", .{n, minMsgSize});
+            return .disarm;
+        }
+
         var fbs = std.io.fixedBufferStream(b.slice[0..n]);
         while (true) {
             var msg = Message.decode(bus.allocator, fbs.reader()) catch |err| switch (err) {
                 error.EndOfStream => break,
+                error.InvalidFields => {
+                    std.debug.print("buf slice: {s}\n", .{b.slice[0..n]});
+                    return .disarm;
+                },
                 else => {
                     log.err("client read err: {any}", .{err});
-                    return .disarm; // TODO: rearm
+                    return .disarm;
                 },
             };
             defer msg.deinit(bus.allocator);
@@ -387,7 +508,11 @@ pub const Dbus = struct {
 
             const interface = bus.interfaces.get(msg.interface.?);
             if (interface) |i| i.call(bus, &msg);
+            if (bus.stats) |_| bus.stats.?.read += 1;
         }
+
+        const buf = @as(*align(8) [4096]u8, @alignCast(@ptrCast(@constCast(b.slice))));
+        bus.read_buffer_pool.destroy(buf);
 
         return .rearm;
     }
@@ -395,7 +520,6 @@ pub const Dbus = struct {
     fn write(
         bus: *Dbus,
         b: []const u8,
-        c: ?*xev.Completion,
         cb: ?fn(
             ?*Dbus,
             *xev.Loop,
@@ -417,9 +541,11 @@ pub const Dbus = struct {
             > comptime @intFromEnum(State.connected)
         );
 
-        bus.socket.?.write(
+        const req = bus.write_request_pool.create() catch unreachable;
+        bus.socket.?.queueWrite(
             &bus.loop,
-            c orelse &bus.write_completion,
+            &bus.write_queue,
+            req,
             .{ .slice = b },
             Dbus,
             bus,
@@ -432,15 +558,16 @@ pub const Dbus = struct {
         l: *xev.Loop,
         c: *xev.Completion,
         socket: Unix,
-        _: xev.WriteBuffer,
+        b: xev.WriteBuffer,
         r: xev.WriteError!usize,
     ) xev.CallbackAction {
         const bus = bus_.?;
         _ = r catch |err| switch (err) {
-            error.BrokenPipe,
-            error.ConnectionResetByPeer,
-            error.Canceled,
-            error.Unexpected,
+            // error.BrokenPipe,
+            // error.ConnectionResetByPeer,
+            // error.Canceled,
+            // error.Unexpected,
+            else
                 => {
                 log.err("client write err: {any}", .{err});
                 socket.shutdown(l, c, Dbus, bus, onShutdown);
@@ -448,6 +575,13 @@ pub const Dbus = struct {
             }
         };
         if (bus.write_callback) |cb| cb(bus);
+        if (bus.stats) |_| bus.stats.?.write += 1;
+
+        const buf = @as(*align(8) [4096]u8, @alignCast(@ptrCast(@constCast(b.slice))));
+        bus.write_buffer_pool.destroy(buf);
+
+        const req = xev.WriteRequest.from(c);
+        bus.write_request_pool.destroy(req);
 
         return .disarm;
     }
@@ -457,9 +591,10 @@ pub const Dbus = struct {
         assert(@intFromEnum(bus.state)
             > comptime @intFromEnum(State.connected)
         );
+        const c = bus.completion_pool.create() catch unreachable;
         bus.socket.?.shutdown(
             &bus.loop,
-            &bus.read_completion,
+            c,
             Dbus,
             bus,
             onShutdown,
@@ -477,6 +612,7 @@ pub const Dbus = struct {
         log.debug("client shutdown: {any}", .{r});
 
         const bus = bus_.?;
+        bus.loop.stop();
         socket.close(l, c, Dbus, bus, onClose);
         return .disarm;
     }
@@ -484,7 +620,7 @@ pub const Dbus = struct {
     fn onClose(
         bus_: ?*Dbus,
         l: *xev.Loop,
-        _: *xev.Completion,
+        c: *xev.Completion,
         socket: Unix,
         r: xev.CloseError!void,
     ) xev.CallbackAction {
@@ -493,6 +629,7 @@ pub const Dbus = struct {
         _ = r catch unreachable;
         log.debug("client close: {any}", .{r});
 
+        bus_.?.completion_pool.destroy(c);
         bus_.?.state = .disconnected;
         return .disarm;
     }

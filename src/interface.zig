@@ -5,6 +5,7 @@ const log = std.log;
 const mem = std.mem;
 const meta = std.meta;
 const toUpper = std.ascii.toUpper;
+const Allocator = std.mem.Allocator;
 const StaticStringMap = std.StaticStringMap;
 const Tuple = meta.Tuple;
 const Type = builtin.Type;
@@ -187,48 +188,48 @@ pub fn Interface(comptime T: anytype) type {
                     }
                 }
 
-                fn appendReturnValue(R: type, ret: R, bus: *Dbus, msg: *Message) !void {
+                fn appendReturnValue(R: type, ret: R, allocator: Allocator, msg: *Message) !void {
                     const ret_info = @typeInfo(R);
                     _ = switch (ret_info) {
                         .void => @as(error{}!void, {}),
-                        .bool => msg.appendBool(bus.allocator, ret),
+                        .bool => msg.appendBool(allocator, ret),
                         .int => |i| switch (i.bits) {
-                            0...8 => msg.appendNumber(bus.allocator, @as(u8, ret)),
+                            0...8 => msg.appendNumber(allocator, @as(u8, ret)),
                             9...16 => msg.appendNumber(
-                                bus.allocator,
+                                allocator,
                                 if (i.signedness == .signed) @as(i16, ret)
                                 else @as(u16, ret)
                             ),
                             17...32 => msg.appendNumber(
-                                bus.allocator,
+                                allocator,
                                 if (i.signedness == .signed) @as(i32, ret)
                                 else @as(u32, ret)
                             ),
                             33...64 => msg.appendNumber(
-                                bus.allocator,
+                                allocator,
                                 if (i.signedness == .signed) @as(i64, ret)
                                 else @as(u64, ret)
                             ),
                             else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
                         },
-                        .@"struct" => msg.appendStruct(bus.allocator, ret),
+                        .@"struct" => msg.appendStruct(allocator, ret),
                         .error_union => |e| blk: {
                             const r = ret catch |err| {
-                                break :blk appendReturnValue(e.error_set, err, bus, msg);
+                                break :blk appendReturnValue(e.error_set, err, allocator, msg);
                             };
-                            break :blk appendReturnValue(R, r, bus, msg);
+                            break :blk appendReturnValue(e.payload, r, allocator, msg);
                         },
                         .error_set => |eset| blk: {
                             if (eset) |_| {
                                 msg.header.msg_type = .@"error";
                                 msg.error_name = @errorName(ret);
                                 msg.signature = "s";
-                                break :blk msg.appendString(bus.allocator, .string, @errorName(ret));
+                                break :blk msg.appendString(allocator, .string, @errorName(ret));
                             } else @panic("error_set must be set");
                         },
                         else => @panic("unsupported return type")
 
-                    } catch @panic("failed to append return value to msgonse message");
+                    } catch @panic("failed to append return value to message");
                 }
 
                 fn f(t: *T, bus: *Dbus, msg: *const Message, sig: ?[]const u8) void {
@@ -248,11 +249,12 @@ pub fn Interface(comptime T: anytype) type {
                         .flags = 0x01,
                         .signature = sig,
                     });
-                    appendReturnValue(ReturnType, ret, bus, &return_msg) catch {
+                    defer return_msg.deinit(bus.allocator);
+                    appendReturnValue(ReturnType, ret, bus.allocator, &return_msg) catch {
                         log.err("failed to append return value", .{});
                     };
 
-                    bus.writeMsg(&return_msg, null) catch log.err("failed to write message", .{});
+                    bus.writeMsg(&return_msg) catch log.err("failed to write message", .{});
                 }
             }.f;
         }

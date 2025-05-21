@@ -347,7 +347,6 @@ pub const Message = struct {
                     },
                     .@"struct" => {
                         assert(value.slice != null);
-                        log.debug("writing struct: {d}\n", .{value.slice.?});
                         try buf_writer.writeAll(value.slice.?);
                     },
                     // TODO:
@@ -549,9 +548,7 @@ pub const Message = struct {
     }
 
     pub fn decode(alloc: Allocator, reader: anytype) !Self {
-        var header: Header = reader.readStruct(Header) catch {
-            return error.InvalidHeader;
-        };
+        var header: Header = try reader.readStruct(Header);
 
         if (header.endian != .little and header.endian != .big)
             return error.InvalidEndian;
@@ -600,6 +597,7 @@ pub const Message = struct {
 
         message.body_buf = try alloc.alloc(u8, message.header.body_len);
         errdefer alloc.free(message.body_buf.?);
+
         n = try reader.readAll(message.body_buf.?);
         if (n != message.header.body_len) return error.InvalidBody;
         try message.parseBody(alloc);
@@ -629,7 +627,7 @@ const MessageType = enum(u8) {
     signal = 4,
 };
 
-const Header = packed struct {
+pub const Header = packed struct {
     endian: Endian,
     msg_type: MessageType,
     flags: u8,

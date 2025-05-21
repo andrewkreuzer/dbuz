@@ -77,6 +77,9 @@ pub const TypeSignature = enum(u8) {
                     }
                     break :blk "(" ++ fields ++ ")";
                 },
+                // we make the assumption we won't error
+                // if we do we'll overwrite the sig
+                .error_union => |e| signatureFromType(e.payload),
                 else => null,
             };
         }
