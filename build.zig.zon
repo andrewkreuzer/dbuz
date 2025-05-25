@@ -5,8 +5,9 @@
     .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .libxev = .{
-            .url = "https://github.com/mitchellh/libxev/archive/refs/heads/main.tar.gz",
-            .hash = "12207181b275448d51e849729dbef3c9d0a0351f1db77bb0d35332088fb800147490",
+            .path = "../libxev",
+            // .url = "https://github.com/mitchellh/libxev/archive/refs/heads/main.tar.gz",
+            // .hash = "12207181b275448d51e849729dbef3c9d0a0351f1db77bb0d35332088fb800147490",
         },
     },
     .paths = .{

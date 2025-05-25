@@ -97,6 +97,7 @@ pub const Message = struct {
     arena: ?ArenaAllocator = null,
 
     const Self = @This();
+    pub const MinimumSize = @sizeOf(Header) + @sizeOf(u32) * 2;
 
     pub fn init(opts: MsgOptions) Self {
         return .{
@@ -539,14 +540,6 @@ pub const Message = struct {
         _ = try parseBytes(alloc, self.signature.?, &bytes_iter, &self.values.?);
     }
 
-    fn swapEndian(
-        value: u32,
-        endian: Endian,
-    ) u32 {
-        if (endian.isSystemEndian()) return value;
-        return @byteSwap(value);
-    }
-
     pub fn decode(alloc: Allocator, reader: anytype) !Self {
         var header: Header = try reader.readStruct(Header);
 
@@ -565,8 +558,8 @@ pub const Message = struct {
         if (header.fields_len == 0)
             return error.InvalidFields;
 
-        header.fields_len = swapEndian(header.fields_len, header.endian);
-        header.body_len = swapEndian(header.body_len, header.endian);
+        header.fields_len = header.endian.swapU32(header.fields_len);
+        header.body_len = header.endian.swapU32(header.body_len);
 
         var message: Self = .{ .header = header };
 
@@ -574,7 +567,7 @@ pub const Message = struct {
         errdefer alloc.free(message.fields_buf.?);
 
         var n = try reader.readAll(message.fields_buf.?);
-        if (n != message.header.fields_len) return error.InvalidFields;
+        if (n != message.header.fields_len) return error.IncompleteMsg;
         try message.parseFields();
 
         if (message.header.body_len == 0
@@ -593,13 +586,15 @@ pub const Message = struct {
         // and confirm padding bytes are zero
         const sig: TypeSignature = .@"struct";
         const pad = sig.alignOffset(@sizeOf(Header) + message.header.fields_len);
-        for (0..pad) |_| assert(try reader.readByte() == 0x00);
+        for (0..pad) |_| assert(
+            (reader.readByte() catch return error.InvalidPadding) == 0x00
+        );
 
         message.body_buf = try alloc.alloc(u8, message.header.body_len);
         errdefer alloc.free(message.body_buf.?);
 
         n = try reader.readAll(message.body_buf.?);
-        if (n != message.header.body_len) return error.InvalidBody;
+        if (n != message.header.body_len) return error.IncompleteMsg;
         try message.parseBody(alloc);
 
         return message;
@@ -616,6 +611,11 @@ const Endian = enum(u8) {
             .little => sysEndian == .little,
             .big => sysEndian == .big,
         };
+    }
+
+    pub fn swapU32(self: Endian, value: u32) u32 {
+        if (self.isSystemEndian()) return value;
+        return @byteSwap(value);
     }
 };
 

@@ -26,8 +26,8 @@ const Notifier = struct {
 
     pub fn notify(
         _: *@This(),
-        a: u8,
-    ) !u8 {
+        a: u32,
+    ) !u32 {
         return a;
     }
 
@@ -60,7 +60,7 @@ pub fn runServer() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var dbus = try Dbus.init(allocator, true);
+    var dbus = try Dbus.init(allocator, false);
     defer dbus.deinit();
 
     dbus.read_callback = struct {
@@ -113,7 +113,8 @@ pub fn runClient() !void {
 
     var completion_pool = CompletionPool.init(allocator);
 
-    const msg_count = 10;
+    const t1 = try Instant.now();
+    const msg_count = 10 * 1000;
     for (0..msg_count) |i| {
         var msg = Message.init(.{
             .msg_type = .method_call,
@@ -122,14 +123,17 @@ pub fn runClient() !void {
             .destination = "net.anunknownalias.Notifier",
             .member = "Notify",
             .flags = 0x04,
-            .signature = "y",
+            .signature = "u",
         });
-        defer msg.deinit(allocator);
 
-        try msg.appendNumber(allocator, @as(u8, @intCast(i)));
+        try msg.appendNumber(allocator, @as(u32, @intCast(i)));
 
         try dbus.writeMsg(&msg);
+        msg.deinit(allocator);
+        try dbus.run(.once);
     }
+
+    const t2 = try Instant.now();
 
     while (msg_read < msg_count) {
         const c_ = try completion_pool.create();
@@ -137,11 +141,23 @@ pub fn runClient() !void {
         try dbus.run(.until_done);
     }
 
+    const t3 = try Instant.now();
+
     completion_pool.deinit();
-    std.debug.print("client done\n", .{});
+
+    const read_time = @as(f64, @floatFromInt(t2.since(t1)));
+    const write_time = @as(f64, @floatFromInt(t3.since(t2)));
+    const total_time = @as(f64, @floatFromInt(t3.since(t1)));
+    std.debug.print("client completed {d} msgs\n", .{msg_read});
+    std.debug.print("client read time {d:.2} seconds\n", .{read_time / 1e9});
+    std.debug.print("client read msg/s {d:.2}\n", .{msg_count / (read_time / 1e9)});
+    std.debug.print("client write time {d:.2} seconds\n", .{write_time / 1e9});
+    std.debug.print("client write msg/s {d:.2}\n", .{msg_count / (write_time / 1e9)});
+    std.debug.print("client total time {d:.2} seconds\n", .{total_time / 1e9});
+    std.debug.print("client total msg/s {d:.2}\n", .{msg_count / (total_time / 1e9)});
 }
 
-var msg_read: u8 = 0;
+var msg_read: u32 = 0;
 
 fn readCallback(
     bus_: ?*Dbus,
@@ -172,13 +188,12 @@ fn readCallback(
                 return .disarm;
             },
         };
-        defer msg.deinit(bus_.?.allocator);
 
         switch (msg.header.msg_type) {
             .method_return => {
                 if (msg.sender) |sender| {
                     if (!std.mem.eql(u8, sender, "org.freedesktop.DBus")) {
-                        std.debug.print("method return: {d}\n", .{msg.body_buf.?});
+                        // std.debug.print("method return: {d}\n", .{msg.body_buf.?});
                     }
                 }
             },
@@ -194,9 +209,9 @@ fn readCallback(
             },
         }
         msg_read += 1;
+        msg.deinit(bus_.?.allocator);
     }
     bus_.?.completion_pool.destroy(c);
-    std.debug.print("client completed read\n", .{});
     return .disarm;
 }
 

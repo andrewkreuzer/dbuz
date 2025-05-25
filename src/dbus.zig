@@ -20,7 +20,11 @@ const Message = message.Message;
 const ReturnPtr = iface.ReturnPtr;
 const Value = message.Value;
 
-const BufferPool = MemoryPool([4096]u8);
+// I've solved having to deal with a partial msg
+// in a full buffer by simple making a big buffer
+// so that never happens 🫤
+const MAX_BUFFER_SIZE = 128 * 1024;
+const BufferPool = MemoryPool([MAX_BUFFER_SIZE]u8);
 const CompletionPool = MemoryPool(xev.Completion);
 const WriteRequestPool = MemoryPool(xev.WriteRequest);
 
@@ -480,9 +484,8 @@ pub const Dbus = struct {
             }
         };
 
-        const minMsgSize = @sizeOf(message.Header);
-        if (n < minMsgSize) {
-            log.err("client read: to few bytes {d}/{d} of minimum message size", .{n, minMsgSize});
+        if (n < Message.MinimumSize) {
+            log.err("client read: to few bytes {d}/{d} of minimum message size", .{n, Message.MinimumSize});
             return .disarm;
         }
 
@@ -490,6 +493,10 @@ pub const Dbus = struct {
         while (true) {
             var msg = Message.decode(bus.allocator, fbs.reader()) catch |err| switch (err) {
                 error.EndOfStream => break,
+                error.IncompleteMsg => {
+                    log.err("client read: incomplete message", .{});
+                    return .disarm;
+                },
                 error.InvalidFields => {
                     std.debug.print("buf slice: {s}\n", .{b.slice[0..n]});
                     return .disarm;
@@ -511,7 +518,7 @@ pub const Dbus = struct {
             if (bus.stats) |_| bus.stats.?.read += 1;
         }
 
-        const buf = @as(*align(8) [4096]u8, @alignCast(@ptrCast(@constCast(b.slice))));
+        const buf = @as(*align(8) [MAX_BUFFER_SIZE]u8, @alignCast(@ptrCast(@constCast(b.slice))));
         bus.read_buffer_pool.destroy(buf);
 
         return .rearm;
@@ -577,7 +584,7 @@ pub const Dbus = struct {
         if (bus.write_callback) |cb| cb(bus);
         if (bus.stats) |_| bus.stats.?.write += 1;
 
-        const buf = @as(*align(8) [4096]u8, @alignCast(@ptrCast(@constCast(b.slice))));
+        const buf = @as(*align(8) [MAX_BUFFER_SIZE]u8, @alignCast(@ptrCast(@constCast(b.slice))));
         bus.write_buffer_pool.destroy(buf);
 
         const req = xev.WriteRequest.from(c);

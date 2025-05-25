@@ -33,6 +33,8 @@
             zig.packages.${system}."0.14.0"
             lldb
             gdb
+            linuxKernel.packages.linux_libre.perf
+            bpftrace
           ];
         };
       }
