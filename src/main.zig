@@ -3,7 +3,7 @@ const lib = @import("libdbuz");
 const ArgIterator = std.process.ArgIterator;
 
 pub const std_options: std.Options = .{
-    .log_level = .info,
+    .log_level = .debug,
 };
 
 

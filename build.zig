@@ -39,10 +39,20 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    // much of the test suite relies on a D-Bus session bus being available
+    const run_integration_tests = std.process.getEnvVarOwned(
+        b.allocator, 
+        "DBUS_SESSION_BUS_ADDRESS"
+    ) != error.EnvironmentVariableNotFound;
+    
+    const options = b.addOptions();
+    options.addOption(bool, "run_integration_tests", run_integration_tests);
+
     const lib_unit_tests = b.addTest(.{
         .root_module = lib_mod,
     });
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    lib_unit_tests.root_module.addOptions("build_options", options);
 
     const exe_unit_tests = b.addTest(.{
         .root_module = exe_mod,

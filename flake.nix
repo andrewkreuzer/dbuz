@@ -30,7 +30,7 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            zig.packages.${system}."0.14.0"
+            zig.packages.${system}."0.14.1"
             lldb
             gdb
             linuxKernel.packages.linux_libre.perf

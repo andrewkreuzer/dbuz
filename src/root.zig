@@ -60,7 +60,8 @@ pub fn runServer() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var dbus = try Dbus.init(allocator, false);
+    // const socket_path = "/tmp/dbuz-test/dbuz.sock";
+    var dbus = try Dbus.init(allocator, null);
     defer dbus.deinit();
 
     dbus.read_callback = struct {
@@ -105,7 +106,7 @@ pub fn runClient() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var dbus = try Dbus.init(allocator, false);
+    var dbus = try Dbus.init(allocator, null);
     defer dbus.deinit();
 
     log.debug("starting dbus client", .{});
@@ -138,7 +139,7 @@ pub fn runClient() !void {
     while (msg_read < msg_count) {
         const c_ = try completion_pool.create();
         dbus.read(c_, readCallback);
-        try dbus.run(.until_done);
+        try dbus.run(.once);
     }
 
     const t3 = try Instant.now();
@@ -216,6 +217,14 @@ fn readCallback(
 }
 
 test {
+    const builtin = @import("builtin");
     _ = @import("message.zig");
-    _ = @import("interface.zig");
+    // _ = @import("interface.zig");
+
+    switch (builtin.os.tag) {
+        .linux => {
+            _ = @import("dbus.zig");
+        },
+        else => {} // no support for other OSes yet
+    }
 }
