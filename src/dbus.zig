@@ -36,6 +36,7 @@ pub const Dbus = struct {
     loop: xev.Loop,
     thread_pool: xev.ThreadPool,
     completion_pool: CompletionPool,
+    read_completion: xev.Completion = undefined,
     write_queue: xev.WriteQueue = .{},
     write_request_pool: WriteRequestPool,
 
@@ -44,7 +45,7 @@ pub const Dbus = struct {
     msg_serial: u32 = 1, // TODO: should this be per sender, not per bus?
 
     allocator: Allocator,
-    read_buffer_pool: BufferPool,
+    read_buffer: [MAX_BUFFER_SIZE]u8 = undefined,
     write_buffer_pool: BufferPool,
 
     state: State,
@@ -91,7 +92,6 @@ pub const Dbus = struct {
             .path = if (path) |p| p else defaultSocketPath(uid),
             .allocator = allocator,
             .write_buffer_pool = BufferPool.init(allocator),
-            .read_buffer_pool = BufferPool.init(allocator),
             .state = .disconnected,
             .interfaces = StringHashMap(BusInterface).init(allocator),
         };
@@ -106,7 +106,6 @@ pub const Dbus = struct {
         bus.interfaces.deinit();
         bus.write_request_pool.deinit();
         bus.write_buffer_pool.deinit();
-        bus.read_buffer_pool.deinit();
         bus.completion_pool.deinit();
     }
 
@@ -415,12 +414,11 @@ pub const Dbus = struct {
             > comptime @intFromEnum(State.connected)
         );
 
-        const buf = bus.read_buffer_pool.create() catch unreachable;
-        const c_ = c orelse bus.completion_pool.create() catch unreachable;
+        const c_ = c orelse &bus.read_completion;
         bus.socket.?.read(
             &bus.loop,
             c_,
-            .{ .slice = buf },
+            .{ .slice = &bus.read_buffer },
             Dbus,
             bus,
             cb orelse onRead,
@@ -484,9 +482,6 @@ pub const Dbus = struct {
                 if (interface) |i| i.call(bus, &msg);
             }
         }
-
-        const buf = @as(*align(8) [MAX_BUFFER_SIZE]u8, @alignCast(@ptrCast(@constCast(b.slice))));
-        bus.read_buffer_pool.destroy(buf);
 
         return .rearm;
     }
@@ -772,9 +767,6 @@ test "send msg" {
                         std.testing.expectEqualStrings("Test", msg.member.?) catch unreachable;
                         std.testing.expectEqual(2, msg.reply_serial.?) catch unreachable;
                     }
-
-                    const buf = @as(*align(8) [MAX_BUFFER_SIZE]u8, @alignCast(@ptrCast(@constCast(b.slice))));
-                    bus.read_buffer_pool.destroy(buf);
 
                     return .disarm;
                 }
