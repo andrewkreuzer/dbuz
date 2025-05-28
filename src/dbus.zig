@@ -15,7 +15,7 @@ const Unix = xev.TCP;
 const iface = @import("interface.zig");
 const message = @import("message.zig");
 const Hello = message.Hello;
-const Interface = iface.BusInterface;
+const BusInterface = iface.BusInterface;
 const Message = message.Message;
 const ReturnPtr = iface.ReturnPtr;
 const Value = message.Value;
@@ -49,7 +49,7 @@ pub const Dbus = struct {
 
     state: State,
 
-    interfaces: StringHashMap(Interface) = undefined,
+    interfaces: StringHashMap(BusInterface) = undefined,
     read_callback: ?*const fn (bus: *Dbus, msg: *Message) void = null,
     write_callback: ?*const fn (bus: *Dbus) void = null,
 
@@ -93,7 +93,7 @@ pub const Dbus = struct {
             .write_buffer_pool = BufferPool.init(allocator),
             .read_buffer_pool = BufferPool.init(allocator),
             .state = .disconnected,
-            .interfaces = StringHashMap(Interface).init(allocator),
+            .interfaces = StringHashMap(BusInterface).init(allocator),
         };
     }
 
@@ -110,7 +110,7 @@ pub const Dbus = struct {
         bus.completion_pool.deinit();
     }
 
-    pub fn bind(bus: *Dbus, name: []const u8, interface: Interface) void {
+    pub fn bind(bus: *Dbus, name: []const u8, interface: BusInterface) void {
         bus.interfaces.put(name, interface) catch unreachable;
     }
 
@@ -373,8 +373,12 @@ pub const Dbus = struct {
     }
 
     pub fn writeMsg(bus: *Dbus, msg: *Message) !void {
-        msg.header.serial = bus.msg_serial;
-        bus.msg_serial += 1;
+        // If the serial isn't set to it's default value
+        // don't overwrite it with our message counter
+        if (msg.header.serial == 1) {
+            msg.header.serial = bus.msg_serial;
+            bus.msg_serial += 1;
+        }
 
         const buf = try bus.write_buffer_pool.create();
         var fbs = std.io.fixedBufferStream(buf);
@@ -463,6 +467,14 @@ pub const Dbus = struct {
                 },
             };
             defer msg.deinit(bus.allocator);
+
+            // TODO remove as user should handle errors
+            if (msg.header.msg_type == .@"error") {
+                log.err(
+                    "client read: error message: {s}",
+                    .{msg.values.?.get(0).?.inner.string.inner}
+                );
+            }
 
             if (bus.read_callback) |cb| cb(bus, &msg);
 

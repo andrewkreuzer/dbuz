@@ -235,11 +235,11 @@ pub fn Interface(comptime T: anytype) type {
                 fn f(t: *T, bus: *Dbus, msg: *const Message, sig: ?[]const u8) void {
                     comptime validate();
                     const args: *Args = @alignCast(@ptrCast(@constCast(msg.body_buf)));
-                    const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
-
                     if (msg.values) |values| {
                         assert(values.values.items.len == args.len);
                     }
+
+                    const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
 
                     var return_msg = Message.init(.{
                         .msg_type = .method_return,
@@ -262,116 +262,155 @@ pub fn Interface(comptime T: anytype) type {
 }
 
 
-const Test = extern struct {
-    a: u32 = 22568,
-    b: bool = true,
-    // @"struct": TestStruct = TestStruct{ .a = 0x05, .b = 0x03 },
-    array: [1]u8 = [_]u8{ 0x01 },
-
-    pub fn sum_digits(self: *Test, b: u32) u32 {
-        return self.a + b;
+test "bind" {
+    const build_options = @import("build_options");
+    if (!build_options.run_integration_tests) {
+        return error.SkipZigTest;
     }
 
-    pub fn notify(self: *Test, b: u32) u32 {
-        self.a += b;
-        return self.a;
+    const alloc = std.testing.allocator;
+    var server = try Dbus.init(alloc, null);
+    defer server.deinit();
+
+    const Test = struct {
+        fn funciton(_: *@This()) void {}
+    };
+
+    var t: Test = .{};
+    server.bind("net.dbuz.Test", Interface(Test).init(&t).interface());
+
+    try server.startServer();
+    try std.testing.expect(server.state == .ready);
+    try std.testing.expect(server.interfaces.count() == 1);
+    try std.testing.expect(server.interfaces.get("net.dbuz.Test") != null);
+
+    server.read_callback = struct {
+        fn cb(bus: *Dbus, m: *Message) void {
+            if (m.reply_serial == null) return;
+            if (m.reply_serial != 123) return;
+            const name_has_owner = m.values.?
+                .get(0)
+                .?.inner
+                .boolean;
+
+            std.testing.expect(name_has_owner) catch unreachable;
+            bus.shutdown();
+        }
+    }.cb;
+
+    var msg = Message.init(.{
+        .msg_type = .method_call,
+        .path = "/org/freedesktop/DBus",
+        .interface = "org.freedesktop.DBus",
+        .destination = "org.freedesktop.DBus",
+        .member = "NameHasOwner",
+        .flags = 0x04,
+        .serial = 123,
+        .signature = "s",
+    });
+    try msg.appendString(alloc, .string, "net.dbuz.Test");
+    defer msg.deinit(alloc);
+
+    try server.writeMsg(&msg);
+    try server.run(.until_done);
+}
+
+test "call" {
+    const eql = std.mem.eql;
+    const build_options = @import("build_options");
+    if (!build_options.run_integration_tests) {
+        return error.SkipZigTest;
     }
 
-    pub fn str(_: *Test, t: *TestStruct) []const u8 {
-        return &t.c;
-    }
+    var loop = try xev.Loop.init(.{});
 
-    pub fn arr(_: *Test, a: []u8) []u8 {
-        return a;
-    }
+    // notify accross threads the server is ready
+    var notifier = try xev.Async.init();
+    defer notifier.deinit();
 
-    pub fn testStruct(_: *Test, test_struct: *TestStruct) TestStruct {
-        test_struct.a = 0;
-        return .{ .a = 0, .b = 0, .c = "What".* };
-    }
-};
+    const Test = struct {
+        a: u32 = 0,
+        pub fn set(t: *@This()) void {
+            t.a = 42;
+        }
+    };
+    var t: Test = .{};
 
-const TestStruct = struct {
-    a: u32,
-    b: u32,
-    c: [4:0]u8 = "Test".*,
-};
+    const server_thread = try std.Thread.spawn(.{}, struct {
+        fn f(t_: *Test, n: *xev.Async) !void {
+            const server_alloc = std.testing.allocator;
+            var server = try Dbus.init(server_alloc, null);
+            defer server.deinit();
 
-// TOOD: Moving bus and msg into f breaks all these tests
-// and arguably this should be more independent
-// test "bind" {
-//     const ArenaAllocator = std.heap.ArenaAllocator;
-//     var bus = Dbus.init(std.testing.allocator);
-//     var t = Test{};
-//     const i: BusInterface = Interface(Test).init(&t).interface();
-//     const allocator = std.testing.allocator;
-//     var arena: ArenaAllocator = ArenaAllocator.init(allocator);
-//     const alloc = arena.allocator();
+            server.bind("net.dbuz.Test", Interface(Test).init(t_).interface());
+            try server.startServer();
 
-//     // const stdin = std.io.getStdIn().reader();
-//     // var buf: [128]u8 = undefined;
-//     // const in = stdin.readUntilDelimiter(&buf, '\n') catch unreachable;
+            server.read_callback = struct {
+                fn cb(bus: *Dbus, m: *Message) void {
+                    if (m.member == null) return;
+                    if (eql(u8, m.member.?, "Shutdown")) {
+                        var shutdown_msg = Message.init(.{
+                            .msg_type = .method_return,
+                            .destination = m.sender,
+                            .sender = m.destination,
+                            .reply_serial = m.header.serial,
+                            .flags = 0x01,
+                        });
+                        defer shutdown_msg.deinit(bus.allocator);
+                        bus.writeMsg(&shutdown_msg) catch unreachable;
+                        bus.shutdown();
+                    }
+                }
+            }.cb;
 
-//     // {
-//     //     const ret = try w.call(alloc, "Arr", .{in});
-//     //     const r: [*:0]u8 = @ptrCast(@alignCast(ret.?));
-//     //     std.debug.print("Arr: {s}\n", .{r});
-//     //     alloc.free(r[0..in.len]);
-//     // }
+            try n.notify();
+            try server.run(.until_done);
+        }
+    }.f, .{&t, &notifier});
 
-//     // our args must have a known type and can't
-//     // when they're defined at comptime, otherwise
-//     // we get an invalid pointer when cast to anyopaque
-//     const args: struct {u32} = .{2};
-//     for (0..5) |_| {
-//         const ret = i.call(alloc, "Notify", &args);
-//         std.debug.print("Notify: {d}\n", .{ret.cast(u32).?.*});
-//     }
+    var c: xev.Completion = undefined;
+    notifier.wait(&loop, &c, void, null, struct {
+        fn cb(
+            _: ?*void,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            _: xev.Async.WaitError!void
+        ) xev.CallbackAction {
+            const client_alloc = std.testing.allocator;
+            var client = Dbus.init(client_alloc, null) catch unreachable;
+            defer client.deinit();
+            client.startClient() catch unreachable;
 
-//     {
-//         const ret = i.call(alloc, "SumDigits", &args);
-//         std.debug.print("SumDigits: {d}\n", .{ret.cast(u32).?.*});
-//     }
+            var msg = Message.init(.{
+                .msg_type = .method_call,
+                .path = "/net/dbuz/Test",
+                .interface = "net.dbuz.Test",
+                .destination = "net.dbuz.Test",
+                .member = "Set",
+                .flags = 0x04,
+                .serial = 123,
+            });
+            client.writeMsg(&msg) catch unreachable;
+            msg.deinit(client.allocator);
+            client.run(.until_done) catch unreachable;
 
-//     {
-//         const ret = i.call(alloc, "SumDigits", &args);
-//         std.debug.print("SumDigits: {d}\n", .{ret.cast(u32).?.*});
-//     }
+            var shutdown_msg = Message.init(.{
+                .msg_type = .method_call,
+                .path = "/net/dbuz/Test",
+                .interface = "net.dbuz.Test",
+                .destination = "net.dbuz.Test",
+                .member = "Shutdown",
+                .flags = 0x00,
+            });
+            client.writeMsg(&shutdown_msg) catch unreachable;
+            shutdown_msg.deinit(client.allocator);
+            client.run(.until_done) catch unreachable;
 
-//     {
-//         const test_struct = TestStruct{ .a = 1, .b = 2 };
-//         // There's gotta be a way to inform anyopaque to populate
-//         // correctly with the type, without having to explicity
-//         // define it like this
-//         const test_struct_arg: struct { *const TestStruct } = .{ &test_struct };
-//         const ret = i.call(alloc, "Str", &test_struct_arg);
-//         const s: [*:0]u8 = @alignCast(@ptrCast(@constCast(ret.ptr.?)));
-//         std.debug.print("Str: {s}\n", .{s[0..4]});
-//     }
+            return .disarm;
+        }
+    }.cb);
 
-//     {
-//         var test_struct = TestStruct{ .a = 1, .b = 2 };
-//         // There's gotta be a way to inform anyopaque to populate
-//         // correctly with the type, without having to explicity
-//         // define it like this
-//         const test_struct_arg: struct { *TestStruct } = .{ &test_struct };
-//         const ret = i.call(alloc, "TestStruct", &test_struct_arg);
-//         std.debug.print("TestStruct: {s}\n", .{ret.cast(TestStruct).?.c});
-//     }
-
-//     const t1 = try std.time.Instant.now();
-//     _ = arena.reset(.free_all);
-//     const t2 = try std.time.Instant.now();
-
-//     const elapsed = @as(f64, @floatFromInt(t2.since(t1)));
-//     std.debug.print("{d:.2} ms\n", .{elapsed / std.time.ns_per_ms});
-
-//     // var some_args = makeArgs();
-//     // const a = w.call("Arr", .{&some_args});
-//     // std.debug.print("Arr: {d}\n", .{a});
-
-//     // var test_struct = TestStruct{ .a = 1, .b = 2 };
-//     // const st = w.call("TestStruct", .{&test_struct});
-//     // std.debug.print("Struct: {any}\n", .{test_struct});
-//     // std.debug.print("Struct: {any}\n", .{st});
-// }
+    try loop.run(.until_done);
+    server_thread.join();
+    try std.testing.expectEqual(42, t.a);
+}

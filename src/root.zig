@@ -219,11 +219,11 @@ fn readCallback(
 test {
     const builtin = @import("builtin");
     _ = @import("message.zig");
-    // _ = @import("interface.zig");
 
     switch (builtin.os.tag) {
         .linux => {
             _ = @import("dbus.zig");
+            _ = @import("interface.zig");
         },
         else => {} // no support for other OSes yet
     }
