@@ -12,12 +12,11 @@ const xev = @import("xev");
 // just treat it as a TCP socket
 const Unix = xev.TCP;
 
-const iface = @import("interface.zig");
+const interface = @import("interface.zig");
 const message = @import("message.zig");
 const Hello = message.Hello;
-const BusInterface = iface.BusInterface;
+const Interface = interface.Interface;
 const Message = message.Message;
-const ReturnPtr = iface.ReturnPtr;
 const Value = message.Value;
 
 // I've solved having to deal with a partial msg
@@ -50,7 +49,7 @@ pub const Dbus = struct {
 
     state: State,
 
-    interfaces: StringHashMap(BusInterface) = undefined,
+    interfaces: StringHashMap(Interface) = undefined,
     read_callback: ?*const fn (bus: *Dbus, msg: *Message) void = null,
     write_callback: ?*const fn (bus: *Dbus) void = null,
 
@@ -93,7 +92,7 @@ pub const Dbus = struct {
             .allocator = allocator,
             .write_buffer_pool = BufferPool.init(allocator),
             .state = .disconnected,
-            .interfaces = StringHashMap(BusInterface).init(allocator),
+            .interfaces = StringHashMap(Interface).init(allocator),
         };
     }
 
@@ -109,8 +108,8 @@ pub const Dbus = struct {
         bus.completion_pool.deinit();
     }
 
-    pub fn bind(bus: *Dbus, name: []const u8, interface: BusInterface) void {
-        bus.interfaces.put(name, interface) catch unreachable;
+    pub fn bind(bus: *Dbus, name: []const u8, iface: Interface) void {
+        bus.interfaces.put(name, iface) catch unreachable;
     }
 
     pub fn defaultSocketPath(uid: u32) []const u8 {
@@ -543,8 +542,8 @@ pub const Dbus = struct {
 
             if (msg.member == null) continue;
             if (msg.interface) |msg_iface| {
-                const interface = bus.interfaces.get(msg_iface);
-                if (interface) |i| i.call(bus, &msg);
+                const iface = bus.interfaces.get(msg_iface);
+                if (iface) |i| i.call(bus, &msg);
             }
         }
 

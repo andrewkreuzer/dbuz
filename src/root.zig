@@ -12,7 +12,7 @@ const ReadBuffer = xev.ReadBuffer;
 const WriteBuffer = xev.WriteBuffer;
 
 const message = @import("message.zig");
-const Interface = @import("interface.zig").Interface;
+const BusInterface = @import("interface.zig").BusInterface;
 const Dbus = @import("dbus.zig").Dbus;
 const Message = message.Message;
 const ObjectPath = @import("types.zig").ObjectPath;
@@ -84,7 +84,7 @@ pub fn runServer() !void {
     }.f;
 
     var notifier: Notifier = .{};
-    const notifier_iface = Interface(Notifier).init(&notifier);
+    const notifier_iface = BusInterface(Notifier).init(&notifier);
     dbus.bind("net.anunknownalias.Notifier", notifier_iface.interface());
 
     log.debug("starting dbus", .{});

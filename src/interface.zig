@@ -12,12 +12,13 @@ const Type = builtin.Type;
 
 const xev = @import("xev");
 
+const message = @import("message.zig");
 const Dbus = @import("dbus.zig").Dbus;
-const Message = @import("message.zig").Message;
+const Message = message.Message;
 const TypeSignature = @import("types.zig").TypeSignature;
 const Values = @import("types.zig").Values;
 
-pub const BusInterface = struct {
+pub const Interface = struct {
     ptr: *const anyopaque,
     vtable: *const VTable,
     const VTable = struct {
@@ -25,7 +26,7 @@ pub const BusInterface = struct {
     };
 
     pub fn call(
-        b: *const BusInterface,
+        b: *const Interface,
         bus: *Dbus,
         msg: *const Message,
     ) void {
@@ -33,7 +34,7 @@ pub const BusInterface = struct {
     }
 };
 
-pub fn Interface(comptime T: anytype) type {
+pub fn BusInterface(comptime T: anytype) type {
     return struct {
         const Self = @This();
 
@@ -52,7 +53,7 @@ pub fn Interface(comptime T: anytype) type {
             return .{.i = t};
         }
 
-        pub fn interface(self: *const Self) BusInterface {
+        pub fn interface(self: *const Self) Interface {
             return .{
                 .ptr = @ptrCast(@alignCast(self)),
                 .vtable = &.{
@@ -277,7 +278,7 @@ test "bind" {
     };
 
     var t: Test = .{};
-    server.bind("net.dbuz.Test", Interface(Test).init(&t).interface());
+    server.bind("net.dbuz.Test", BusInterface(Test).init(&t).interface());
 
     try server.startServer();
     try std.testing.expect(server.state == .ready);
@@ -334,7 +335,7 @@ test "call" {
     var server = try Dbus.init(alloc, null);
     defer server.deinit();
 
-    server.bind("net.dbuz.test.Call", Interface(Test).init(&t).interface());
+    server.bind("net.dbuz.test.Call", BusInterface(Test).init(&t).interface());
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
@@ -401,7 +402,7 @@ test "return types" {
     var server = try Dbus.init(alloc, null);
     defer server.deinit();
 
-    server.bind("net.dbuz.test.ReturnTypes", Interface(Test).init(&t).interface());
+    server.bind("net.dbuz.test.ReturnTypes", BusInterface(Test).init(&t).interface());
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
