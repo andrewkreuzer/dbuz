@@ -299,16 +299,7 @@ test "bind" {
         }
     }.cb;
 
-    var msg = Message.init(.{
-        .msg_type = .method_call,
-        .path = "/org/freedesktop/DBus",
-        .interface = "org.freedesktop.DBus",
-        .destination = "org.freedesktop.DBus",
-        .member = "NameHasOwner",
-        .flags = 0x04,
-        .serial = 123,
-        .signature = "s",
-    });
+    var msg = message.NameHasOwner;
     try msg.appendString(alloc, .string, "net.dbuz.Test");
     defer msg.deinit(alloc);
 
@@ -450,6 +441,9 @@ test "return types" {
                 return .disarm;
             };
             defer msg.deinit(bus.allocator);
+            // TODO we may occasionaly get a signal in these replies
+            // likey due to other test clients connecting/disconnecting
+            // if (msg.header.msg_type == .signal) return .rearm;
             std.testing.expectEqual(
                 42,
                 msg.values.?.get(0).?.inner.uint32,

@@ -34,6 +34,17 @@ pub const RequestName = Message.init(.{
     .flags = 0x04
 });
 
+pub var NameHasOwner = Message.init(.{
+    .msg_type = .method_call,
+    .path = "/org/freedesktop/DBus",
+    .interface = "org.freedesktop.DBus",
+    .destination = "org.freedesktop.DBus",
+    .member = "NameHasOwner",
+    .flags = 0x04,
+    .serial = 123,
+    .signature = "s",
+});
+
 const MsgOptions = struct {
     endian: Message.Endian = .little,
     msg_type: Message.Type,

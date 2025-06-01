@@ -787,7 +787,7 @@ test "send msg" {
                 };
                 defer msg.deinit(bus.allocator);
 
-                if (msg.header.msg_type == .signal) return .disarm;
+                if (msg.header.msg_type == .signal) continue;
                 std.testing.expectEqual(.method_return, msg.header.msg_type) catch unreachable;
                 std.testing.expectEqualStrings("/net/dbuz/test/SendMsg", msg.path.?) catch unreachable;
                 std.testing.expectEqualStrings("net.dbuz.test.SendMsg", msg.interface.?) catch unreachable;
