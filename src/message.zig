@@ -8,10 +8,12 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 
 const types = @import("types.zig");
+const BytesIterator = @import("BytesIterator.zig");
+const SignatureIterator = @import("SignatureIterator.zig");
+const TypeSignature = types.TypeSignature;
 const Value = types.Value;
 const Values = types.Values;
 const ValueUnion = types.ValueUnion;
-const TypeSignature = types.TypeSignature;
 
 pub const Hello = Message.init(.{
     .msg_type = .method_call,
@@ -33,8 +35,8 @@ pub const RequestName = Message.init(.{
 });
 
 const MsgOptions = struct {
-    endian: Endian = .little,
-    msg_type: MessageType,
+    endian: Message.Endian = .little,
+    msg_type: Message.Type,
     serial: u32 = 1,
     path: ?[]const u8 = null,
     interface: ?[]const u8 = null,
@@ -98,6 +100,73 @@ pub const Message = struct {
 
     const Self = @This();
     pub const MinimumSize = @sizeOf(Header) + @sizeOf(u32) * 2;
+
+    const Endian = enum(u8) {
+        little = 'l',
+        big = 'B',
+
+        pub fn isSystemEndian(self: Endian) bool {
+            const sysEndian = @import("builtin").cpu.arch.endian();
+            return switch (self) {
+                .little => sysEndian == .little,
+                .big => sysEndian == .big,
+            };
+        }
+
+        pub fn swapU32(self: Endian, value: u32) u32 {
+            if (self.isSystemEndian()) return value;
+            return @byteSwap(value);
+        }
+    };
+
+    const Type = enum(u8) {
+        invalid = 0,
+        method_call = 1,
+        method_return = 2,
+        @"error" = 3,
+        signal = 4,
+    };
+
+    const Flags = enum(u3) {
+        no_reply_expected = 0x1,
+        no_auto_start = 0x2,
+        allow_interactive_authorization = 0x4,
+    };
+
+    const FieldCode = enum(u8) {
+        invalid = 0,
+        path = 1,
+        interface = 2,
+        member = 3,
+        error_name = 4,
+        reply_serial = 5,
+        destination = 6,
+        sender = 7,
+        signature = 8,
+        unix_fds = 9,
+    };
+
+    pub const Header = packed struct {
+        endian: Endian,
+        msg_type: Type,
+        flags: u8,
+        protocol_version: u8,
+        body_len: u32,
+        serial: u32,
+        fields_len: u32,
+
+        pub fn init(opts: MsgOptions) @This() {
+            return .{
+                .endian = opts.endian,
+                .msg_type = opts.msg_type,
+                .flags = opts.flags,
+                .protocol_version = 1,
+                .serial = opts.serial,
+                .body_len = 0,
+                .fields_len = 0,
+            };
+        }
+    };
 
     pub fn init(opts: MsgOptions) Self {
         return .{
@@ -406,72 +475,8 @@ pub const Message = struct {
 
                 else => return error.InvalidField,
             };
-        // TODO: hacky, read fields as actual structs
-        bytes_iter.index += TypeSignature.@"struct".alignOffset(bytes_iter.index);
+            bytes_iter.index += TypeSignature.@"struct".alignOffset(bytes_iter.index);
         }
-    }
-
-    test "container signatures" {
-        const cases = [_]struct {
-            t: TypeSignature,
-            sig: []const u8,
-            expected: []const u8
-        }{
-            .{ .t = .array, .sig = "yaai", .expected = "y" },
-            .{ .t = .array, .sig = "ayuu", .expected = "ay" },
-            .{ .t = .array, .sig = "{ay}yy", .expected = "{ay}" },
-            .{ .t = .array, .sig = "{a{ay}}aay", .expected = "{a{ay}}" },
-            .{ .t = .array, .sig = "{a{a{ay}}}uu", .expected = "{a{a{ay}}}" },
-            .{ .t = .array, .sig = "{a{a{a{ay}}}}xx", .expected = "{a{a{a{ay}}}}" },
-            .{ .t = .@"struct", .sig = "sas)", .expected = "sas" },
-            .{ .t = .dict_entry, .sig = "sa}", .expected = "sa" },
-        };
-        for (cases) |c| {
-            var iter = SignatureIterator{ .buffer = c.sig };
-            const contained_sig = try readContainerSignature(c.t, &iter);
-            try std.testing.expectEqualSlices(u8, c.expected, contained_sig.?);
-        }
-    }
-
-    fn readContainerSignature(
-        T: TypeSignature,
-        iter: *SignatureIterator,
-    ) !?[]const u8 {
-        const start = iter.index;
-        var i: usize = 1;
-        var stack: [64]u8 = undefined;
-        switch (T) {
-            .@"struct" => stack[0] = ')',
-            .dict_entry => stack[0] = '}',
-            .array => i -= 1,
-            else => return null,
-        }
-
-        while (iter.next()) |c| {
-            const s = if (i > 0) stack[i-1] else 0;
-            switch (c) {
-                'a' => continue,
-                ')', '}' => |b| {
-                    if (s == b) i -= 1 else return error.InvalidSignature;
-                    if (i == 0 and (T == .@"struct" or T == .dict_entry)) {
-                        const end = iter.index-1;
-                        return iter.buffer[start..end];
-                    }
-                },
-                '(' => {
-                    if (i >= stack.len) return error.SignatureMaxDepth;
-                    stack[i] = ')';
-                    i += 1;
-                },
-                '{' => {
-                    if (i >= stack.len) return error.SignatureMaxDepth;
-                    stack[i] = '}';
-                    i += 1;
-                },
-                else => {}
-            }
-            if (i == 0) { const end = iter.index; return iter.buffer[start..end]; }
-        } else return error.InvalidSignature;
     }
 
     fn parseBytes(
@@ -485,7 +490,7 @@ pub const Message = struct {
 
         while (sig_iter.next()) |t| {
             const T: TypeSignature = @enumFromInt(t);
-            const contained_sig = try readContainerSignature(T, &sig_iter);
+            const contained_sig = try sig_iter.readContainerSignature(T);
             const conained_type: ?TypeSignature =
                 if (contained_sig) |sig| @enumFromInt(sig[0]) else null;
             const b = bytes_iter.next(T, conained_type) orelse return error.InvalidBodySignature;
@@ -598,192 +603,6 @@ pub const Message = struct {
         try message.parseBody(alloc);
 
         return message;
-    }
-};
-
-const Endian = enum(u8) {
-    little = 'l',
-    big = 'B',
-
-    pub fn isSystemEndian(self: Endian) bool {
-        const sysEndian = @import("builtin").cpu.arch.endian();
-        return switch (self) {
-            .little => sysEndian == .little,
-            .big => sysEndian == .big,
-        };
-    }
-
-    pub fn swapU32(self: Endian, value: u32) u32 {
-        if (self.isSystemEndian()) return value;
-        return @byteSwap(value);
-    }
-};
-
-const MessageType = enum(u8) {
-    invalid = 0,
-    method_call = 1,
-    method_return = 2,
-    @"error" = 3,
-    signal = 4,
-};
-
-pub const Header = packed struct {
-    endian: Endian,
-    msg_type: MessageType,
-    flags: u8,
-    protocol_version: u8,
-    body_len: u32,
-    serial: u32,
-    fields_len: u32,
-
-    pub fn init(opts: MsgOptions) @This() {
-        return .{
-            .endian = opts.endian,
-            .msg_type = opts.msg_type,
-            .flags = opts.flags,
-            .protocol_version = 1,
-            .serial = opts.serial,
-            .body_len = 0,
-            .fields_len = 0,
-        };
-    }
-};
-
-const Flags = enum(u3) {
-    no_reply_expected = 0x1,
-    no_auto_start = 0x2,
-    allow_interactive_authorization = 0x4,
-};
-
-const FieldCode = enum(u8) {
-    invalid = 0,
-    path = 1,
-    interface = 2,
-    member = 3,
-    error_name = 4,
-    reply_serial = 5,
-    destination = 6,
-    sender = 7,
-    signature = 8,
-    unix_fds = 9,
-};
-
-const BytesIterator = struct {
-    buffer: []const u8,
-    index: usize = 0,
-    const Self = @This();
-
-    fn pos(self: *Self) usize {
-        return self.index;
-    }
-
-    fn next(self: *Self, T: TypeSignature, t: ?TypeSignature) ?[]const u8 {
-        const result, const n = self.peek(T, t) orelse return null;
-        self.index += n;
-        return result;
-    }
-
-    fn peek(self: *Self, T: TypeSignature, t: ?TypeSignature) ?struct{ []const u8, usize } {
-        const offset = T.alignOffset(self.index);
-        var alignment = self.index + offset;
-        if (alignment >= self.buffer.len) return null;
-
-        return switch (T) {
-            .byte => .{
-                self.buffer[alignment..][0..@sizeOf(u8)],
-                offset + @sizeOf(u8)
-            },
-            .boolean => .{
-                self.buffer[alignment..][0..@sizeOf(u32)],
-                offset + @sizeOf(u32)
-            },
-            .int16 => .{
-                self.buffer[alignment..][0..@sizeOf(i16)],
-                offset + @sizeOf(i16)
-            },
-            .uint16 => .{
-                self.buffer[alignment..][0..@sizeOf(u16)],
-                offset + @sizeOf(u16)
-            },
-            .int32 => .{
-                self.buffer[alignment..][0..@sizeOf(i32)],
-                offset + @sizeOf(i32)
-            },
-            .uint32 => .{
-                self.buffer[alignment..][0..@sizeOf(u32)],
-                offset + @sizeOf(u32)
-            },
-            .int64 => .{
-                self.buffer[alignment..][0..@sizeOf(i64)],
-                offset + @sizeOf(i64)
-            },
-            .uint64 => .{
-                self.buffer[alignment..][0..@sizeOf(u64)],
-                offset + @sizeOf(u64)
-            },
-            .double => .{
-                self.buffer[alignment..][0..@sizeOf(f64)],
-                offset + @sizeOf(f64)
-            },
-            .signature => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u8)];
-                const len = mem.readInt(u8, slice, .little);
-                const ret = self.buffer[alignment+@sizeOf(u8)..][0..len];
-                const n = offset + len + @sizeOf(u8) + 1; // 1 for null byte
-                break :blk .{ ret, n };
-            },
-            .variant => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u8)];
-                const len = mem.readInt(u8, slice, .little);
-                const ret = self.buffer[alignment+@sizeOf(u8)..][0..len];
-                const n = offset + len + @sizeOf(u8) + 1; // 1 for null byte
-                break :blk .{ ret, n }; // 1 for null byte
-            },
-            .object_path, .string => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u32)];
-                const len = mem.readInt(u32, slice, .little);
-                const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
-                const n = offset + len + @sizeOf(u32) + 1;
-                break :blk .{ ret, n }; // 1 for null byte
-            },
-            .array => blk: {
-                const slice = self.buffer[alignment..][0..@sizeOf(u32)];
-                const len = mem.readInt(u32, slice, .little);
-                const offset_ = t.?.alignOffset(alignment + @sizeOf(u32));
-                alignment += offset_;
-                const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];
-                const n = offset + offset_ + len + @sizeOf(u32) + 1;
-                break :blk .{ ret, n };
-            },
-            .@"struct", .dict_entry  => .{ self.buffer[alignment..], offset },
-            else =>  null,
-        };
-    }
-};
-
-const SignatureIterator = struct {
-    buffer: []const u8,
-    index: usize = 0,
-
-    const Self = @This();
-
-    fn next(self: *Self) ?u8 {
-        const result = self.peek() orelse return null;
-        self.index += 1;
-        return result;
-    }
-
-    fn peek(self: *Self) ?u8 {
-        if (self.index >= self.buffer.len) return null;
-        return self.buffer[self.index];
-    }
-
-    fn rest(self: *Self) []const u8 {
-        return self.buffer[self.index..];
-    }
-
-    fn advance(self: *Self, n: usize) void {
-        self.index += n;
     }
 };
 
@@ -940,7 +759,7 @@ test "encode method return" {
 test "decode" {
     const cases = [_]struct {
         name: []const u8,
-        msg_type: MessageType,
+        msg_type: Message.Type,
         path: ?[]const u8 = null,
         interface: ?[]const u8 = null,
         member: ?[]const u8 = null,
@@ -1111,7 +930,7 @@ test "array" {
     const String = @import("types.zig").String;
     const cases = [_]struct {
         name: []const u8,
-        msg_type: MessageType,
+        msg_type: Message.Type,
         path: ?[]const u8 = null,
         interface: ?[]const u8 = null,
         member: ?[]const u8 = null,
