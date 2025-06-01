@@ -141,6 +141,7 @@ pub const Value = struct {
     type: TypeSignature,
     inner: ValueUnion,
     contained_sig: ?[]const u8 = null,
+    allocated: bool = false,
     slice: ?[]const u8 = null,
 };
 
@@ -158,6 +159,7 @@ pub const Values = struct {
     fn free(alloc: Allocator, value: *Value) void {
         switch (value.*.inner) {
             .array, .@"struct", .dict_entry => |*val| {
+                if (value.allocated) alloc.free(value.slice.?);
                 val.deinit(alloc);
             },
             .variant => |v| {
@@ -457,6 +459,7 @@ pub const Values = struct {
             .type = .@"struct",
             .inner = .{ .@"struct" = struct_values },
             .contained_sig = sig,
+            .allocated = true,
             .slice = try buf.toOwnedSlice()
         });
     }
@@ -484,10 +487,6 @@ test "values from struct" {
     var values = Values.init(alloc);
     try values.appendStruct(alloc, s);
     defer values.deinit(alloc);
-    // TODO: gets allocated for wrting a msg but isn't when reading
-    // so we either need to allocate the read or find an alternate
-    // when writing
-    alloc.free(values.values.items[0].slice.?);
     assert(values.values.items[0].inner.@"struct".len() == 7);
 }
 

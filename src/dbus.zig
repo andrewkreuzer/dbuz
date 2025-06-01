@@ -145,6 +145,13 @@ pub const Dbus = struct {
         bus.read(null, null);
     }
 
+    pub fn startServerWithName(bus: *Dbus, name: []const u8) !void {
+        try bus.connect();
+        try bus.authenticate();
+        try bus.hello();
+        try bus.requestName(name);
+        bus.read(null, null);
+    }
 
     pub fn run(bus: *Dbus, mode: xev.RunMode) !void {
         try bus.loop.run(mode);
@@ -368,7 +375,65 @@ pub const Dbus = struct {
         try msg.appendNumber(bus.allocator, @as(u32, 1));
 
         try bus.writeMsg(&msg);
-        try bus.loop.run(.once);
+        bus.read(null, struct {
+            fn cb(
+                bus_: ?*Dbus,
+                _: *xev.Loop,
+                _: *xev.Completion,
+                _: Unix,
+                b: xev.ReadBuffer,
+                r: xev.ReadError!usize,
+            ) xev.CallbackAction {
+                const n = r catch |err| switch (err) {
+                    error.EOF => return .disarm,
+                    else => {
+                        log.err("client request name read err: {any}", .{err});
+                        return .disarm;
+                    },
+                };
+                if (n < Message.MinimumSize) {
+                    log.err("client request name read: to few bytes {d}/{d} of minimum message size", .{n, Message.MinimumSize});
+                    return .disarm;
+                }
+                var fbs = std.io.fixedBufferStream(b.slice[0..n]);
+                while (true) {
+                    var msg_ = Message.decode(bus_.?.allocator, fbs.reader()) catch |err| switch (err) {
+                        error.EndOfStream => break,
+                        error.IncompleteMsg => {
+                            log.err("client request name read err: incomplete message", .{});
+                            return .disarm;
+                        },
+                        error.InvalidFields => {
+                            log.err("client request name read err: invalid fields: {s}\n", .{b.slice[0..n]});
+                            return .disarm;
+                        },
+                        else => {
+                            log.err("client request name read err: {any}", .{err});
+                            return .disarm;
+                        },
+                    };
+                    defer msg_.deinit(bus_.?.allocator);
+
+                    if (msg_.header.msg_type == .@"error") {
+                        log.err(
+                            "client request name read: {s}",
+                            .{msg_.values.?.get(0).?.inner.string.inner}
+                        );
+                    }
+
+                    if (msg_.header.msg_type == .signal) continue;
+                    switch (msg_.values.?.get(0).?.inner.uint32) {
+                        1 => return .disarm,
+                        else => {
+                            log.err("client request name read: unexpected reply value: {d}", .{msg_.values.?.get(0).?.inner.uint32});
+                            return .disarm;
+                        }
+                    }
+                }
+                return .rearm;
+            }
+        }.cb);
+        try bus.run(.until_done);
     }
 
     pub fn writeMsg(bus: *Dbus, msg: *Message) !void {
@@ -531,10 +596,14 @@ pub const Dbus = struct {
         r: xev.WriteError!usize,
     ) xev.CallbackAction {
         const bus = bus_.?;
-        _ = r catch |err| {
-            log.err("client write err: {any}", .{err});
-            socket.shutdown(l, c, Dbus, bus, onShutdown);
-            return .disarm;
+        _ = r catch |err| switch (err) {
+            // TODO: should notify when we get these errors
+            error.BrokenPipe, error.ConnectionResetByPeer => return .disarm,
+            else => {
+                log.err("client write err: {any}", .{err});
+                socket.shutdown(l, c, Dbus, bus, onShutdown);
+                return .disarm;
+            }
         };
 
         if (bus.write_callback) |cb| cb(bus);
@@ -645,163 +714,116 @@ test "setup and shutdown" {
 }
 
 test "send msg" {
-    const eql = std.mem.eql;
     const build_options = @import("build_options");
     if (!build_options.run_integration_tests) {
         return error.SkipZigTest;
     }
 
-    var loop = try xev.Loop.init(.{});
+    const alloc = std.testing.allocator;
+    var server = try Dbus.init(alloc, null);
+    defer server.deinit();
 
-    // notify accross threads the server is ready
-    var notifier = try xev.Async.init();
-    defer notifier.deinit();
+    try server.startServerWithName("net.dbuz.test.SendMsg");
+    try std.testing.expect(server.state == .ready);
 
-    const server_thread = try std.Thread.spawn(.{}, struct {
-        fn f(n: *xev.Async) !void {
-            const server_alloc = std.testing.allocator;
-            var server = try Dbus.init(server_alloc, null);
-            defer server.deinit();
-            try server.startServer();
-            try std.testing.expect(server.state == .ready);
-
-            try server.requestName("net.dbuz.Test");
-
-            server.read_callback = struct {
-                fn cb(bus: *Dbus, m: *Message) void {
-                    if (m.member) |member| {
-                        if (std.mem.eql(u8, member, "Shutdown")) {
-                            var shutdown_msg = Message.init(.{
-                                .msg_type = .method_return,
-                                .destination = m.sender,
-                                .sender = m.destination,
-                                .reply_serial = m.header.serial,
-                                .flags = 0x01,
-                            });
-                            defer shutdown_msg.deinit(bus.allocator);
-                            bus.writeMsg(&shutdown_msg) catch std.posix.exit(1);
-                            bus.shutdown();
-                        }
-                    }
-
-                    if (m.sender) |sender| {
-                        if (eql(u8, sender, "org.freedesktop.DBus")) {
-                            return;
-                        }
-                    }
-
-                    var echo = m.*;
-                    defer echo.deinit(bus.allocator);
-                    echo.header.msg_type = .method_return;
-                    echo.destination = m.sender;
-                    echo.sender = m.destination;
-                    echo.reply_serial = m.header.serial;
-                    echo.header.flags = 0x01;
-                    bus.writeMsg(&echo) catch unreachable;
-                }
-            }.cb;
-
-            try n.notify();
-            try server.run(.until_done);
+    server.read_callback = struct {
+        fn cb(bus: *Dbus, m: *Message) void {
+            var echo = m.*;
+            defer echo.deinit(bus.allocator);
+            echo.header.msg_type = .method_return;
+            echo.destination = m.sender;
+            echo.sender = m.destination;
+            echo.reply_serial = m.header.serial;
+            echo.header.flags = 0x01;
+            bus.writeMsg(&echo) catch unreachable;
         }
-    }.f, .{&notifier});
+    }.cb;
 
-    var c: xev.Completion = undefined;
-    notifier.wait(&loop, &c, void, null, struct {
+    var client = try Dbus.init(alloc, null);
+    defer client.deinit();
+    try client.startClient();
+
+    const read = struct {
         fn cb(
-            _: ?*void,
+            bus_: ?*Dbus,
             _: *xev.Loop,
             _: *xev.Completion,
-            _: xev.Async.WaitError!void
+            _: Unix,
+            b: xev.ReadBuffer,
+            r: xev.ReadError!usize,
         ) xev.CallbackAction {
-            const client_alloc = std.testing.allocator;
-            var client = Dbus.init(client_alloc, null) catch unreachable;
-            defer client.deinit();
-            client.startClient() catch unreachable;
-
-            const read = struct {
-                fn cb(
-                    bus_: ?*Dbus,
-                    _: *xev.Loop,
-                    _: *xev.Completion,
-                    _: Unix,
-                    b: xev.ReadBuffer,
-                    r: xev.ReadError!usize,
-                ) xev.CallbackAction {
-                    const bus = bus_.?;
-                    const n = r catch |err| switch (err) {
-                        error.EOF => return .disarm,
-                        else => {
-                            log.err("client read err: {any}", .{err});
-                            return .disarm;
-                        }
-                    };
-
-                    if (n < Message.MinimumSize) {
-                        log.err("client read: to few bytes {d}/{d} of minimum message size", .{n, Message.MinimumSize});
-                        return .disarm;
-                    }
-
-                    var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-                    while (true) {
-                        var msg = Message.decode(bus.allocator, fbs.reader()) catch |err| switch (err) {
-                            error.EndOfStream => break,
-                            error.IncompleteMsg => {
-                                log.err("client read: incomplete message", .{});
-                                return .disarm;
-                            },
-                            error.InvalidFields => {
-                                log.err("client read: invalid fields: {s}\n", .{b.slice[0..n]});
-                                return .disarm;
-                            },
-                            else => {
-                                log.err("client read err: {any}", .{err});
-                                return .disarm;
-                            },
-                        };
-                        defer msg.deinit(bus.allocator);
-
-                        std.testing.expectEqual(.method_return, msg.header.msg_type) catch unreachable;
-                        std.testing.expectEqualStrings("/net/dbuz/Test", msg.path.?) catch unreachable;
-                        std.testing.expectEqualStrings("net.dbuz.Test", msg.interface.?) catch unreachable;
-                        std.testing.expectEqualStrings("Test", msg.member.?) catch unreachable;
-                        std.testing.expectEqual(2, msg.reply_serial.?) catch unreachable;
-                    }
-
+            const bus = bus_.?;
+            const n = r catch |err| switch (err) {
+                error.EOF => return .disarm,
+                else => {
+                    log.err("client read err: {any}", .{err});
                     return .disarm;
                 }
-            }.cb;
+            };
 
-            var msg = Message.init(.{
-                .msg_type = .method_call,
-                .path = "/net/dbuz/Test",
-                .interface = "net.dbuz.Test",
-                .destination = "net.dbuz.Test",
-                .member = "Test",
-                .flags = 0x00,
-            });
-            client.writeMsg(&msg) catch unreachable;
-            msg.deinit(client.allocator);
-            client.read(null, read);
-            client.run(.until_done) catch unreachable;
+            if (n < Message.MinimumSize) {
+                log.err(
+                    "client read: to few bytes {d}/{d} of minimum message size",
+                    .{n, Message.MinimumSize}
+                );
+                return .disarm;
+            }
 
-            var shutdown_msg = Message.init(.{
-                .msg_type = .method_call,
-                .path = "/net/dbuz/Test",
-                .interface = "net.dbuz.Test",
-                .destination = "net.dbuz.Test",
-                .member = "Shutdown",
-                .flags = 0x00,
-            });
-            client.writeMsg(&shutdown_msg) catch unreachable;
-            shutdown_msg.deinit(client.allocator);
-            client.run(.until_done) catch unreachable;
+            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
+            while (true) {
+                var msg = Message.decode(bus.allocator, fbs.reader()) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.IncompleteMsg => {
+                        log.err("client read: incomplete message", .{});
+                        return .disarm;
+                    },
+                    error.InvalidFields => {
+                        log.err("client read: invalid fields: {s}\n", .{b.slice[0..n]});
+                        return .disarm;
+                    },
+                    else => {
+                        log.err("client read err: {any}", .{err});
+                        return .disarm;
+                    },
+                };
+                defer msg.deinit(bus.allocator);
+
+                if (msg.header.msg_type == .signal) return .disarm;
+                std.testing.expectEqual(.method_return, msg.header.msg_type) catch unreachable;
+                std.testing.expectEqualStrings("/net/dbuz/test/SendMsg", msg.path.?) catch unreachable;
+                std.testing.expectEqualStrings("net.dbuz.test.SendMsg", msg.interface.?) catch unreachable;
+                std.testing.expectEqualStrings("Test", msg.member.?) catch unreachable;
+                std.testing.expectEqual(2, msg.reply_serial.?) catch unreachable;
+            }
 
             return .disarm;
         }
-    }.cb);
+    }.cb;
 
-    try loop.run(.until_done);
-    server_thread.join();
+    var msg = Message.init(.{
+        .msg_type = .method_call,
+        .path = "/net/dbuz/test/SendMsg",
+        .interface = "net.dbuz.test.SendMsg",
+        .destination = "net.dbuz.test.SendMsg",
+        .member = "Test",
+        .flags = 0x00,
+    });
+    try client.writeMsg(&msg);
+    try client.run(.once);
+    msg.deinit(client.allocator);
+
+    // read and write
+    try server.run(.once);
+    try server.run(.once);
+
+    client.read(null, read);
+    try client.run(.once);
+
+    server.shutdown();
+    server.run(.until_done) catch unreachable;
+    try std.testing.expect(server.state == .disconnected);
+
+    client.shutdown();
+    client.run(.until_done) catch unreachable;
+    try std.testing.expect(client.state == .disconnected);
 }
-

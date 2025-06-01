@@ -44,7 +44,6 @@ pub fn build(b: *std.Build) void {
         b.allocator, 
         "DBUS_SESSION_BUS_ADDRESS"
     ) != error.EnvironmentVariableNotFound;
-    
     const options = b.addOptions();
     options.addOption(bool, "run_integration_tests", run_integration_tests);
 
