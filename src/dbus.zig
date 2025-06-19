@@ -19,9 +19,8 @@ const Interface = interface.Interface;
 const Message = message.Message;
 const Value = message.Value;
 
-// I've solved having to deal with a partial msg
-// in a full buffer by simple making a big buffer
-// so that never happens 🫤
+// TODO:
+// maximum size of a dbus message is 128MiB
 const MAX_BUFFER_SIZE = 128 * 1024;
 const BufferPool = MemoryPool([MAX_BUFFER_SIZE]u8);
 const CompletionPool = MemoryPool(xev.Completion);
@@ -44,6 +43,12 @@ pub const Dbus = struct {
     msg_serial: u32 = 1, // TODO: should this be per sender, not per bus?
 
     allocator: Allocator,
+    // TODO:
+    // I've solved having to deal with a partial msg
+    // in a full buffer by simple making a bigger buffer
+    // so that never happens 🫤. Although this isn't
+    // even the dbus max message size...
+    // 2 to the 27th power or 134217728 (128 MiB)
     read_buffer: [MAX_BUFFER_SIZE]u8 = undefined,
     write_buffer_pool: BufferPool,
 

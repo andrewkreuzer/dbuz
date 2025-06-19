@@ -1,4 +1,3 @@
-const SignatureIterator = @import("SignatureIterator.zig");
 const TypeSignature = @import("types.zig").TypeSignature;
 
 buffer: []const u8,
@@ -83,7 +82,7 @@ test "container signatures" {
         .{ .t = .dict_entry, .sig = "sa}", .expected = "sa" },
     };
     for (cases) |c| {
-        var iter = SignatureIterator{ .buffer = c.sig };
+        var iter: Self = .{ .buffer = c.sig };
         const contained_sig = try iter.readContainerSignature(c.t);
         try std.testing.expectEqualSlices(u8, c.expected, contained_sig.?);
     }

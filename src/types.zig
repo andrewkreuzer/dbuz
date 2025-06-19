@@ -26,6 +26,23 @@ pub const TypeSignature = enum(u8) {
     dict_entry = '{', // e
     unix_fd = 'h',
 
+    /// get the Dbus spec alignment for the given type type
+    fn alignOf(self: TypeSignature) usize {
+        return switch (self) {
+            .null, .signature, .variant, .byte => 1,
+            .int16, .uint16 => 2,
+            .int32, .uint32, .boolean, .string, .object_path, .array, .unix_fd => 4,
+            .int64, .uint64, .double, .@"struct", .dict_entry => 8,
+        };
+    }
+
+    /// get the offset to the next alignment for this type
+    pub fn alignOffset(self: TypeSignature, index: usize) usize {
+        if (index == 0) return 0;
+        const alignment = self.alignOf();
+        return (~index + 1) & (alignment - 1);
+    }
+
     pub inline fn fromType(T: type) @This() {
         comptime {
             const sig = @typeInfo(T);
@@ -69,6 +86,21 @@ pub const TypeSignature = enum(u8) {
                     if (f.bits != 64) @compileError("Invalid float, dbus only supports IEEE 754 floats");
                     break :blk "d";
                 },
+                .pointer => |p| blk: {
+                    if (p.is_const and p.child == u8) {
+                        break :blk "s"; // we assume const u8 slices are strings
+                    }
+                    switch (p.size) {
+                        .one => return signatureFromType(p.child),
+                        .many => return null, // we don't support many pointers
+                        // .slice => {
+                        //     const sig = TypeSignature.fromType(p.child);
+                        //     if (sig == .null) return null; // we don't support null slices
+                        //     break :blk "a" ++ sig.?; // we assume slices are arrays
+                        // },
+                        .c => return null,
+                    }
+                },
                 .array => |a| "a" ++ signatureFromType(a.child).?,
                 .@"struct" => |s| blk: {
                     var fields: []const u8 = "";
@@ -77,29 +109,10 @@ pub const TypeSignature = enum(u8) {
                     }
                     break :blk "(" ++ fields ++ ")";
                 },
-                // we make the assumption we won't error
-                // if we do we'll overwrite the sig
                 .error_union => |e| signatureFromType(e.payload),
                 else => null,
             };
         }
-    }
-
-    /// get the Dbus spec alignment for the given type type
-    fn alignOf(self: TypeSignature) usize {
-        return switch (self) {
-            .null, .signature, .variant, .byte => 1,
-            .int16, .uint16 => 2,
-            .int32, .uint32, .boolean, .string, .object_path, .array, .unix_fd => 4,
-            .int64, .uint64, .double, .@"struct", .dict_entry => 8,
-        };
-    }
-
-    /// get the offset to the next alignment for this type
-    pub fn alignOffset(self: TypeSignature, index: usize) usize {
-        if (index == 0) return 0;
-        const alignment = self.alignOf();
-        return (~index + 1) & (alignment - 1);
     }
 };
 
@@ -231,15 +244,14 @@ pub const Values = struct {
                 .slice => blk: {
                     // TODO: should we assume const u8 slices are strings?
                     if (p.child == u8 and p.is_const) {
-                        break :blk self.append(.{
+                        break :blk self.values.append(.{
                             .type = .string,
-                            .inner = .{ .string = String{ .inner = value } }
+                            .inner = .{ .string = String{ .inner = value } },
+                            .allocated = true,
+                            .slice = value,
                         });
                     }
-                    break :blk self.append(.{
-                        .type = .array,
-                        .inner = .{ .array = Values.fromSlice(alloc, p.child, value.*) }
-                    });
+                    break :blk self.appendSlice(alloc, p.child, value);
                 },
                 .c => {},
             },
@@ -283,6 +295,21 @@ pub const Values = struct {
         var values = ArrayList(Value).init(alloc);
         try values.append(.{ .type = .array, .inner = .{ .array = slice_values }, .contained_sig = "" });
         return .{ .values = values };
+    }
+
+    pub fn appendSlice(self: *Self, alloc: Allocator, Child: anytype, slice: []const Child) !void {
+        const slice_info = @typeInfo(@TypeOf(slice));
+        assert(slice_info == .array);
+        const sig = TypeSignature.signatureFromType(@TypeOf(slice));
+        var slice_values = Values.init(alloc);
+        for (slice) |item| {
+            try slice_values.appendAnyType(alloc, item);
+        }
+        try self.values.append(.{
+            .type = .array,
+            .inner = .{ .array = slice_values },
+            .contained_sig = sig,
+        });
     }
 
     pub fn fromArray(alloc: Allocator, Child: anytype, array: []const Child) !Values {

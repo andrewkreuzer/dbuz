@@ -165,9 +165,11 @@ pub const Message = struct {
         body_len: u32,
         serial: u32,
         fields_len: u32,
+    };
 
-        pub fn init(opts: MsgOptions) @This() {
-            return .{
+    pub fn init(opts: MsgOptions) Self {
+        return .{
+            .header = .{
                 .endian = opts.endian,
                 .msg_type = opts.msg_type,
                 .flags = opts.flags,
@@ -175,13 +177,7 @@ pub const Message = struct {
                 .serial = opts.serial,
                 .body_len = 0,
                 .fields_len = 0,
-            };
-        }
-    };
-
-    pub fn init(opts: MsgOptions) Self {
-        return .{
-            .header = Header.init(opts),
+            },
             .path = opts.path,
             .interface = opts.interface,
             .member = opts.member,
@@ -254,6 +250,30 @@ pub const Message = struct {
         const v: Value = .{ .type = .boolean, .inner = .{ .boolean = value } };
         try values.append(v);
         self.values = values;
+    }
+
+    pub fn appendPointer(
+        self: *Self,
+        alloc: Allocator,
+        ptr: anytype,
+    ) !void {
+        const ptr_info = @typeInfo(@TypeOf(ptr));
+        assert(ptr_info == .pointer);
+        var values_list = self.values orelse Values.init(alloc);
+        try values_list.appendAnyType(alloc, ptr);
+        self.values = values_list;
+    }
+
+    pub fn appendArray(
+        self: *Self,
+        alloc: Allocator,
+        array: anytype,
+    ) !void {
+        const array_info = @typeInfo(@TypeOf(array));
+        assert(array_info == .array);
+        var values_list = self.values orelse Values.init(alloc);
+        try values_list.appendArray(alloc, array);
+        self.values = values_list;
     }
 
     pub fn appendStruct(
