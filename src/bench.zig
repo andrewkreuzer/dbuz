@@ -117,6 +117,7 @@ const Client = struct {
         try dbus.startClient();
 
         var completion_pool = CompletionPool.init(allocator);
+        defer completion_pool.deinit();
 
         const t1 = try Instant.now();
         const msg_count = 10 * 1000;
@@ -141,6 +142,7 @@ const Client = struct {
         }
 
         const t2 = try Instant.now();
+
         while (msg_read < msg_count) {
             const c = try completion_pool.create();
             dbus.read(c, readCallback);
@@ -148,16 +150,17 @@ const Client = struct {
         }
         const t3 = try Instant.now();
 
-        completion_pool.deinit();
+        dbus.shutdown();
+        try dbus.run(.until_done);
 
-        const read_time = @as(f64, @floatFromInt(t2.since(t1)));
-        const write_time = @as(f64, @floatFromInt(t3.since(t2)));
+        const write_time = @as(f64, @floatFromInt(t2.since(t1)));
+        const read_time = @as(f64, @floatFromInt(t3.since(t2)));
         const total_time = @as(f64, @floatFromInt(t3.since(t1)));
         std.debug.print("client completed {d} msgs\n", .{msg_read});
-        std.debug.print("client read time {d:.2} seconds\n", .{read_time / 1e9});
-        std.debug.print("client read msg/s {d:.2}\n", .{msg_count / (read_time / 1e9)});
         std.debug.print("client write time {d:.2} seconds\n", .{write_time / 1e9});
         std.debug.print("client write msg/s {d:.2}\n", .{msg_count / (write_time / 1e9)});
+        std.debug.print("client read time {d:.2} seconds\n", .{read_time / 1e9});
+        std.debug.print("client read msg/s {d:.2}\n", .{msg_count / (read_time / 1e9)});
         std.debug.print("client total time {d:.2} seconds\n", .{total_time / 1e9});
         std.debug.print("client total msg/s {d:.2}\n", .{msg_count / (total_time / 1e9)});
     }
