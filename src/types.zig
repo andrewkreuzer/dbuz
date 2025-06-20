@@ -342,131 +342,6 @@ pub const Values = struct {
         });
     }
 
-    fn writeBytes(comptime T: type, w: Writer, pos: usize, v: T) !usize {
-        var i = pos;
-        switch (@typeInfo(T)) {
-            .@"struct" => |struct_info| {
-                try w.writeByteNTimes(0x00, TypeSignature.@"struct".alignOffset(i));
-                inline for (struct_info.fields) |f| {
-                    if (struct_info.backing_integer) |Int| {
-                        const bytes = std.mem.toBytes(@as(Int, @bitCast(@field(v, f.name))));
-                        try w.writeAll(&bytes);
-                        i += bytes.len;
-                    } else {
-                        i += try writeBytes(f.type, w, i, @field(v, f.name));
-                    }
-                }
-            },
-            .array => |a| {
-                // @sizeOf(v) isn't going to work with structs
-                try w.writeInt(u32, @as(u32, @sizeOf(@TypeOf(v))), builtin.target.cpu.arch.endian());
-                try w.writeByteNTimes(0x00, TypeSignature.fromType(a.child).alignOffset(i));
-                try w.writeAll(@as([]const u8, @ptrCast(&v)));
-                // for (v) |item| {
-                //     i += try writeBytes(@TypeOf(item), w, i, item);
-                // }
-            },
-            .@"enum" => {
-                const bytes = std.mem.toBytes(@intFromEnum(v));
-                try w.writeAll(&bytes);
-                i += bytes.len;
-            },
-            .bool => {
-                const bytes = std.mem.toBytes(@as(u32, @intFromBool(v)));
-                try w.writeAll(&bytes);
-                i += bytes.len;
-            },
-            .float => |float_info| {
-                const bytes = std.mem.toBytes(@as(std.meta.Int(.unsigned, float_info.bits), @bitCast(v)));
-                try w.writeAll(&bytes);
-                i += bytes.len;
-            },
-            else => {
-                const bytes = std.mem.toBytes(v);
-                try w.writeAll(&bytes);
-                i += bytes.len;
-            },
-        }
-        return i;
-    }
-
-
-    fn writeSwappedBytes(comptime T: type, w: Writer, pos: usize, v: T) !usize {
-        var i = pos;
-        switch (@typeInfo(T)) {
-            .@"struct" => |struct_info| {
-                try w.writeByteNTimes(0x00, TypeSignature.@"struct".alignOffset(i));
-                inline for (struct_info.fields) |f| {
-                    if (struct_info.backing_integer) |Int| {
-                        const bytes = std.mem.toBytes(@byteSwap(@as(Int, @bitCast(@field(v, f.name)))));
-                        try w.writeAll(&bytes);
-                        i += bytes.len;
-                    } else {
-                        i += try writeSwappedBytes(f.type, w, i, @field(v, f.name));
-                    }
-                }
-            },
-            .array => {
-                try w.writeByteNTimes(0x00, TypeSignature.fromType(@TypeOf(v[0])).alignOffset(i));
-                try w.writeInt(
-                    u32,
-                    @as(u32, v.len),
-                    if (builtin.target.cpu.arch.endian() == .little) .big else .little,
-                );
-                for (v) |item| {
-                    i += try writeSwappedBytes(@TypeOf(item), w, i, item);
-                }
-            },
-            .@"enum" => {
-                const bytes = std.mem.toBytes(@byteSwap(@intFromEnum(v)));
-                try w.writeAll(&bytes);
-                i += bytes.len;
-            },
-            .bool => {
-                const bytes = std.mem.toBytes(@byteSwap(@as(u32, @intFromBool(v))));
-                try w.writeAll(&bytes);
-                i += bytes.len;
-            },
-            .float => |float_info| {
-                const bytes = std.mem.toBytes(@byteSwap(@as(std.meta.Int(.unsigned, float_info.bits), @bitCast(v))));
-                try w.writeAll(&bytes);
-                i += bytes.len;
-            },
-            .pointer => |p| switch (p.size) {
-                .one => i += try writeSwappedBytes(p.child, w, i, v.*),
-                .slice => {}, // i += try writeBytes([v.len]u8, w, i, v.*),
-                .c, .many => {},
-            },
-            else => {
-                const bytes = std.mem.toBytes(@byteSwap(v));
-                try w.writeAll(&bytes);
-                i += bytes.len;
-            },
-        }
-        return i;
-    }
-
-    fn writeLittle(comptime T: type, w: Writer, pos: usize, v: T) !usize {
-        return switch (builtin.target.cpu.arch.endian()) {
-            .little => writeBytes(T, w, pos, v),
-            .big => writeSwappedBytes(T, w, pos, v),
-        };
-    }
-
-    fn writeBig(comptime T: type, w: Writer, pos: usize, v: T) !usize {
-        return switch (builtin.target.cpu.arch.endian()) {
-            .little => writeSwappedBytes(T, w, pos, v),
-            .big => writeBytes(T, w, pos, v),
-        };
-    }
-
-    fn writeBytesWithEndian(comptime T: type, w: Writer, pos: usize, v: T, endianness: Endian) !usize {
-        return switch (endianness) {
-            .little => writeLittle(T, w, pos, v),
-            .big => writeBig(T, w, pos, v),
-        };
-    }
-
     pub fn appendStruct(self: *Self, alloc: Allocator, @"struct": anytype) !void {
         const struct_info = @typeInfo(@TypeOf(@"struct"));
         assert(struct_info == .@"struct");
@@ -489,6 +364,74 @@ pub const Values = struct {
             .allocated = true,
             .slice = try buf.toOwnedSlice()
         });
+    }
+
+    fn writeBytesWithEndian(comptime T: type, w: Writer, pos: usize, v: T, endianness: Endian) !usize {
+        const swap = builtin.target.cpu.arch.endian() != endianness;
+        var i = pos;
+        switch (@typeInfo(T)) {
+            .@"struct" => |struct_info| {
+                try w.writeByteNTimes(0x00, TypeSignature.@"struct".alignOffset(i));
+                inline for (struct_info.fields) |f| {
+                    if (struct_info.backing_integer) |Int| {
+                        const bytes =
+                            if (swap) std.mem.toBytes(@byteSwap(@as(Int, @bitCast(@field(v, f.name)))))
+                            else std.mem.toBytes(@as(Int, @bitCast(@field(v, f.name))));
+                        try w.writeAll(&bytes);
+                        i += bytes.len;
+                    } else {
+                        i += try writeBytesWithEndian(f.type, w, i, @field(v, f.name), endianness);
+                    }
+                }
+            },
+            .array => {
+                try w.writeByteNTimes(0x00, TypeSignature.fromType(@TypeOf(v[0])).alignOffset(i));
+                if (swap) {
+                    try w.writeInt(
+                        u32,
+                        @as(u32, v.len),
+                        if (builtin.target.cpu.arch.endian() == .little) .big else .little,
+                    );
+                } else {
+                    try w.writeInt(u32, @as(u32, @sizeOf(@TypeOf(v))), builtin.target.cpu.arch.endian());
+                }
+                for (v) |item| {
+                    i += try writeBytesWithEndian(@TypeOf(item), w, i, item, endianness);
+                }
+            },
+            .@"enum" => {
+                const bytes =
+                    if (swap) std.mem.toBytes(@byteSwap(@intFromEnum(v)))
+                    else std.mem.toBytes(@intFromEnum(v));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            .bool => {
+                const bytes =
+                    if (swap) std.mem.toBytes(@byteSwap(@as(u32, @intFromBool(v))))
+                    else std.mem.toBytes(@as(u32, @intFromBool(v)));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            .float => |float_info| {
+                const bytes =
+                    if (swap) std.mem.toBytes(@byteSwap(@as(std.meta.Int(.unsigned, float_info.bits), @bitCast(v))))
+                    else std.mem.toBytes(@as(std.meta.Int(.unsigned, float_info.bits), @bitCast(v)));
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+            .pointer => |p| switch (p.size) {
+                .one => i += try writeBytesWithEndian(p.child, w, i, v.*, endianness),
+                .slice => {}, // i += try writeBytes([v.len]u8, w, i, v.*),
+                .c, .many => {},
+            },
+            else => {
+                const bytes = if (swap) std.mem.toBytes(@byteSwap(v)) else std.mem.toBytes(v);
+                try w.writeAll(&bytes);
+                i += bytes.len;
+            },
+        }
+        return i;
     }
 };
 
