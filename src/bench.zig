@@ -1,24 +1,18 @@
 const std = @import("std");
 const log = std.log;
 const mem = std.mem;
-const posix = std.posix;
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Instant = std.time.Instant;
 const MemoryPool = std.heap.MemoryPool;
 const Thread = std.Thread;
 
 const xev = @import("xev");
-const ReadBuffer = xev.ReadBuffer;
-const WriteBuffer = xev.WriteBuffer;
 
 const lib = @import("libdbuz");
 const message = lib.message;
-const ArgIterator = std.process.ArgIterator;
 const BusInterface = lib.BusInterface;
 const Dbus = lib.Dbus;
 const Message = message.Message;
-const ObjectPath = lib.ObjectPath;
 
 pub const std_options: std.Options = .{
     .log_level = .err,
@@ -203,7 +197,7 @@ const Client = struct {
             switch (msg.header.msg_type) {
                 .method_return => {
                     if (msg.sender) |sender| {
-                        if (!std.mem.eql(u8, sender, "org.freedesktop.DBus")) {
+                        if (!mem.eql(u8, sender, "org.freedesktop.DBus")) {
                             // std.debug.print("method return: {d}\n", .{msg.body_buf.?});
                         }
                     }
