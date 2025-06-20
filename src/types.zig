@@ -366,6 +366,7 @@ pub const Values = struct {
         });
     }
 
+    // TODO: this should be used for writing all values to a Dbus message
     fn writeBytesWithEndian(comptime T: type, w: Writer, pos: usize, v: T, endianness: Endian) !usize {
         const swap = builtin.target.cpu.arch.endian() != endianness;
         var i = pos;

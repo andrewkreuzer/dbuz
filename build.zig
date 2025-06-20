@@ -12,13 +12,6 @@ pub fn build(b: *std.Build) void {
     const xev = b.dependency("libxev", .{ .target = target, .optimize = optimize });
     lib_mod.addImport("xev", xev.module("xev"));
 
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe_mod.addImport("libdbuz", lib_mod);
-
     const lib = b.addLibrary(.{
         .linkage = .static,
         .name = "dbuz",
@@ -26,18 +19,33 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
-    const exe = b.addExecutable(.{
-        .name = "dbuz",
-        .root_module = exe_mod,
+    const exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
-    b.installArtifact(exe);
+    exe_mod.addImport("libdbuz", lib_mod);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mod.addImport("libdbuz", lib_mod);
+    bench_mod.addImport("xev", xev.module("xev"));
 
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = bench_mod,
+    });
+    b.installArtifact(bench);
+
+    const bench_cmd = b.addRunArtifact(bench);
+    bench_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| bench_cmd.addArgs(args);
+
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&bench_cmd.step);
 
     // much of the test suite relies on a D-Bus session bus being available
     const run_integration_tests = std.process.getEnvVarOwned(

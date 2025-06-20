@@ -49,8 +49,8 @@ pub fn BusInterface(comptime T: anytype) type {
             return_sig: ?[]const u8 = null,
         };
 
-        pub fn init(t: *T) Self {
-            return .{.i = t};
+        pub fn init(i: *T) Self {
+            return .{.i = i};
         }
 
         pub fn interface(self: *const Self) Interface {
@@ -263,7 +263,6 @@ pub fn BusInterface(comptime T: anytype) type {
         }
     };
 }
-
 
 test "bind" {
     const build_options = @import("build_options");

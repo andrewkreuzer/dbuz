@@ -6,7 +6,6 @@ pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 
-
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     var iter = try ArgIterator.initWithAllocator(allocator);

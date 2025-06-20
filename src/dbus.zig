@@ -221,7 +221,9 @@ pub const Dbus = struct {
         );
 
         bus.write(msg, onAuthWrite);
-        try bus.loop.run(.until_done);
+        try bus.loop.run(.once); // write auth
+        try bus.loop.run(.once); // read response
+        try bus.loop.run(.once); // write begin
     }
 
     fn onAuthWrite(
@@ -309,7 +311,8 @@ pub const Dbus = struct {
         try msg.encode(bus.allocator, writer);
 
         bus.write(fbs.getWritten(), onHelloWrite);
-        try bus.loop.run(.until_done);
+        try bus.loop.run(.once); // write hello
+        try bus.loop.run(.once); // read hello response
     }
 
     fn onHelloWrite(
@@ -437,7 +440,8 @@ pub const Dbus = struct {
                 return .rearm;
             }
         }.cb);
-        try bus.run(.until_done);
+        try bus.run(.once); // write request name
+        try bus.run(.once); // read request name response
     }
 
     pub fn writeMsg(bus: *Dbus, msg: *Message) !void {
@@ -642,7 +646,7 @@ pub const Dbus = struct {
         r: xev.ShutdownError!void,
     ) xev.CallbackAction {
         _ = r catch unreachable;
-        log.debug("client shutdown: {any}", .{r});
+        log.debug("dbus shutdown: {any}", .{r});
 
         const bus = bus_.?;
         socket.close(l, c, Dbus, bus, onClose);
@@ -667,7 +671,7 @@ pub const Dbus = struct {
     }
 };
 
-test "connection" {
+test "setup and shutdown" {
     const build_options = @import("build_options");
     if (!build_options.run_integration_tests) {
         return error.SkipZigTest;
@@ -680,36 +684,11 @@ test "connection" {
 
     try server.connect();
     try std.testing.expect(server.state == .connected);
-}
 
-test "authentication" {
-    const build_options = @import("build_options");
-    if (!build_options.run_integration_tests) {
-        return error.SkipZigTest;
-    }
-
-    const allocator = std.testing.allocator;
-
-    var server = try Dbus.init(allocator, null);
-    defer server.deinit();
-
-    try server.connect();
     try server.authenticate();
     try std.testing.expect(server.state == .authenticated);
-}
 
-test "setup and shutdown" {
-    const build_options = @import("build_options");
-    if (!build_options.run_integration_tests) {
-        return error.SkipZigTest;
-    }
-
-    const allocator = std.testing.allocator;
-
-    var server = try Dbus.init(allocator, null);
-    defer server.deinit();
-
-    try server.startServer();
+    try server.hello();
     try std.testing.expect(server.state == .ready);
 
     server.shutdown();

@@ -231,7 +231,7 @@ pub const Message = struct {
             i64 => .{ .type = .int64, .inner = .{ .int64 = value }},
             f64 => .{ .type = .double, .inner = .{ .double = value }},
             comptime_int, comptime_float =>
-                @compileError("numbers passed to appendNumber must be given an explicit fixed-size number type"),
+                @compileError("numbers passed to appendNumber must be given an explicit fixed-size number type, try wrapping with @as"),
             else =>
                 @compileError("expected number type got" ++ @typeName(@TypeOf(value))),
         };
@@ -404,9 +404,8 @@ pub const Message = struct {
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
-            // I would think we could use the buf.items.len for this
-            // but it fails tests with incorrect size for fields
-            // and I'm to lazy to figure out why right now
+            // we use size to avoid incorporating the padding
+            // after the last value into the fields_len
             self.header.fields_len = @as(u32, @intCast(size));
 
             const pad = TypeSignature.@"struct".alignOffset(buf.items.len);
