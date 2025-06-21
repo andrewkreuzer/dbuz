@@ -198,6 +198,16 @@ pub const Message = struct {
         if (self.error_allocated) alloc.free(self.error_name.?);
     }
 
+    pub fn appendAnyType(
+        self: *Self,
+        alloc: Allocator,
+        value: anytype
+    ) !void {
+        var values = self.values orelse Values.init(alloc);
+        try values.appendAnyType(alloc, value);
+        self.values = values;
+    }
+
     pub fn appendString(
         self: *Self,
         alloc: Allocator,
@@ -216,32 +226,6 @@ pub const Message = struct {
         self.values = values;
     }
 
-    pub fn appendNumber(
-        self: *Self,
-        alloc: Allocator,
-        value: anytype
-    ) !void {
-        var values = self.values orelse Values.init(alloc);
-
-        const v: Value = switch (@TypeOf(value)) {
-            u8 => .{ .type = .byte, .inner = .{ .byte = value }},
-            u16 => .{ .type = .uint16, .inner = .{ .uint16 = value }},
-            i16 => .{ .type = .int16, .inner = .{ .int16 = value }},
-            u32 => .{ .type = .uint32, .inner = .{ .uint32 = value }},
-            i32 => .{ .type = .int32, .inner = .{ .int32 = value }},
-            u64 => .{ .type = .uint64, .inner = .{ .uint64 = value }},
-            i64 => .{ .type = .int64, .inner = .{ .int64 = value }},
-            f64 => .{ .type = .double, .inner = .{ .double = value }},
-            comptime_int, comptime_float =>
-                @compileError("numbers passed to appendNumber must be given an explicit fixed-size number type, try wrapping with @as"),
-            else =>
-                @compileError("expected number type got" ++ @typeName(@TypeOf(value))),
-        };
-
-        try values.append(v);
-        self.values = values;
-    }
-
     pub fn appendBool(
         self: *Self,
         alloc: Allocator,
@@ -249,8 +233,27 @@ pub const Message = struct {
     ) !void {
         assert(@TypeOf(value) == bool);
         var values = self.values orelse Values.init(alloc);
-        const v: Value = .{ .type = .boolean, .inner = .{ .boolean = value } };
-        try values.append(v);
+        try values.appendBool(value);
+        self.values = values;
+    }
+
+    pub fn appendNumber(
+        self: *Self,
+        alloc: Allocator,
+        value: anytype
+    ) !void {
+        const num_info = @typeInfo(@TypeOf(value));
+        assert(num_info == .int or num_info == .float);
+        var values = self.values orelse Values.init(alloc);
+        if (num_info == .comptime_float or num_info == .comptime_int) {
+            @compileError("numbers passed to appendNumber must be given an explicit fixed-size number type, try wrapping with @as, e.g. @as(u32, 1234)");
+        }
+
+        try switch (num_info) {
+            .int => values.appendInt(value),
+            .float => values.appendFloat(value),
+            else => unreachable, // we already checked the type
+        };
         self.values = values;
     }
 
@@ -259,11 +262,10 @@ pub const Message = struct {
         alloc: Allocator,
         ptr: anytype,
     ) !void {
-        const ptr_info = @typeInfo(@TypeOf(ptr));
-        assert(ptr_info == .pointer);
-        var values_list = self.values orelse Values.init(alloc);
-        try values_list.appendAnyType(alloc, ptr);
-        self.values = values_list;
+        assert(@typeInfo(@TypeOf(ptr)) == .pointer);
+        var values = self.values orelse Values.init(alloc);
+        try values.appendPointer(alloc, ptr);
+        self.values = values;
     }
 
     pub fn appendArray(
@@ -271,11 +273,10 @@ pub const Message = struct {
         alloc: Allocator,
         array: anytype,
     ) !void {
-        const array_info = @typeInfo(@TypeOf(array));
-        assert(array_info == .array);
-        var values_list = self.values orelse Values.init(alloc);
-        try values_list.appendArray(alloc, array);
-        self.values = values_list;
+        assert(@typeInfo(@TypeOf(array)) == .array);
+        var values = self.values orelse Values.init(alloc);
+        try values.appendArray(alloc, array);
+        self.values = values;
     }
 
     pub fn appendStruct(
@@ -283,11 +284,32 @@ pub const Message = struct {
         alloc: Allocator,
         @"struct": anytype,
     ) !void {
-        const struct_info = @typeInfo(@TypeOf(@"struct"));
-        assert(struct_info == .@"struct");
+        assert(@typeInfo(@TypeOf(@"struct")) == .@"struct");
         var values = self.values orelse Values.init(alloc);
         try values.appendStruct(alloc, @"struct");
         self.values = values;
+    }
+
+    pub fn appendError(
+        self: *Self,
+        alloc: Allocator,
+        comptime bus_name: []const u8,
+        err: anytype,
+        error_msg: ?[]const u8,
+    ) !void {
+        assert(@typeInfo(@TypeOf(err)) == .error_set);
+        const bus_error_prefix = bus_name ++ ".Error.";
+        const err_name = @errorName(err);
+
+        var buf = try alloc.alloc(u8, bus_error_prefix.len + err_name.len);
+        @memcpy(buf[0..bus_error_prefix.len], bus_error_prefix);
+        @memcpy(buf[bus_error_prefix.len..], err_name);
+
+        self.error_name = buf;
+        self.error_allocated = true;
+        self.header.msg_type = .@"error";
+        self.signature = "s";
+        return self.appendString(alloc, .string, error_msg orelse err_name);
     }
 
     pub fn appendValuesFromSlice(self: *Self, alloc: Allocator, slice: []const Value) !void {

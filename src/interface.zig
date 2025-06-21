@@ -190,32 +190,15 @@ pub fn BusInterface(comptime T: anytype, bus_name: []const u8) type {
                 }
 
                 fn appendReturnValue(R: type, ret: R, allocator: Allocator, msg: *Message) !void {
-                    const ret_info = @typeInfo(R);
-                    _ = switch (ret_info) {
+                    try switch (@typeInfo(R)) {
                         .void => @as(error{}!void, {}),
-                        .bool => msg.appendBool(allocator, ret),
-                        .int => |i| switch (i.bits) {
-                            0...8 => msg.appendNumber(allocator, @as(u8, ret)),
-                            9...16 => msg.appendNumber(
-                                allocator,
-                                if (i.signedness == .signed) @as(i16, ret)
-                                else @as(u16, ret)
-                            ),
-                            17...32 => msg.appendNumber(
-                                allocator,
-                                if (i.signedness == .signed) @as(i32, ret)
-                                else @as(u32, ret)
-                            ),
-                            33...64 => msg.appendNumber(
-                                allocator,
-                                if (i.signedness == .signed) @as(i64, ret)
-                                else @as(u64, ret)
-                            ),
-                            else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
-                        },
-                        .pointer => msg.appendPointer(allocator, ret),
-                        .array => msg.appendArray(allocator, ret),
-                        .@"struct" => msg.appendStruct(allocator, ret),
+                        .bool,
+                        .int,
+                        .float,
+                        .pointer,
+                        .array,
+                        .@"struct"
+                            => msg.appendAnyType(allocator, ret),
                         .error_union => |e| blk: {
                             const r = ret catch |err| {
                                 break :blk appendReturnValue(e.error_set, err, allocator, msg);
@@ -224,23 +207,13 @@ pub fn BusInterface(comptime T: anytype, bus_name: []const u8) type {
                         },
                         .error_set => |eset| blk: {
                             if (eset) |_| {
-                                const bus_error_prefix = bus_name ++ ".Error.";
-                                const err_name = @errorName(ret);
-
-                                var err = try allocator.alloc(u8, bus_error_prefix.len + err_name.len);
-                                @memcpy(err[0..bus_error_prefix.len], bus_error_prefix);
-                                @memcpy(err[bus_error_prefix.len..], err_name);
-
-                                msg.error_name = err;
-                                msg.error_allocated = true;
-                                msg.header.msg_type = .@"error";
-                                msg.signature = "s";
-                                break :blk msg.appendString(allocator, .string, @errorName(ret));
-                            } else @panic("error_set must be set");
+                                break :blk msg.appendError(allocator, bus_name, ret, null);
+                            // We catch here although I don't know how you could define a null error_set
+                            } else @compileError("interface return error_set must not be null");
                         },
-                        else => @panic("unsupported return type " ++ @typeName(R))
+                        else => @compileError("unsupported interface return type " ++ @typeName(R))
 
-                    } catch @panic("failed to append return value to message");
+                    };
                 }
 
                 fn f(t: *T, bus: *Dbus, msg: *const Message, sig: ?[]const u8) void {
@@ -458,9 +431,6 @@ test "return types" {
                 return .disarm;
             };
             defer msg.deinit(bus.allocator);
-            // TODO we may occasionaly get a signal in these replies
-            // likey due to other test clients connecting/disconnecting
-            // if (msg.header.msg_type == .signal) return .rearm;
             std.testing.expectEqual(
                 42,
                 msg.values.?.get(0).?.inner.uint32,

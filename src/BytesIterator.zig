@@ -62,6 +62,7 @@ pub fn peek(self: *Self, T: TypeSignature, t: ?TypeSignature) ?struct{ []const u
         },
         .string, .object_path  => blk: {
             // TODO: when tests are run in a loop we get index out of bounds
+            // sd-bus still has messages in our queues??
             const slice = self.buffer[alignment..][0..@sizeOf(u32)];
             const len = mem.readInt(u32, slice, .little);
             const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];

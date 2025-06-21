@@ -45,8 +45,8 @@ pub const TypeSignature = enum(u8) {
 
     pub inline fn fromType(T: type) @This() {
         comptime {
-            const sig = @typeInfo(T);
-            return switch (sig) {
+            const t_info = @typeInfo(T);
+            return switch (t_info) {
                 .void => .null,
                 .null, .optional => @compileError("Invalid type, functions cannot return null"),
                 .bool => .boolean,
@@ -70,8 +70,8 @@ pub const TypeSignature = enum(u8) {
 
     pub inline fn signatureFromType(T: type) ?[]const u8 {
         comptime {
-            const sig = @typeInfo(T);
-            return switch (sig) {
+            const t_info = @typeInfo(T);
+            return switch (t_info) {
                 .void => null,
                 .null, .optional => @compileError("Invalid type, functions cannot return null"),
                 .bool => "b",
@@ -105,7 +105,7 @@ pub const TypeSignature = enum(u8) {
                 .@"struct" => |s| blk: {
                     var fields: []const u8 = "";
                     for (s.fields) |f| {
-                        fields = fields ++ (signatureFromType(f.type) orelse ""); // TODO
+                        fields = fields ++ (signatureFromType(f.type) orelse "");
                     }
                     break :blk "(" ++ fields ++ ")";
                 },
@@ -135,7 +135,6 @@ pub const ValueUnion = union(TypeSignature) {
     variant: struct{[]const u8, *Value},
     dict_entry: Values,
     unix_fd: i32,
-
 };
 
 pub const String = struct {
@@ -201,6 +200,10 @@ pub const Values = struct {
         return &self.values.items[index];
     }
 
+    pub fn appendSliceOfValues(self: *Self, slice: []const Value) !void {
+        try self.values.appendSlice(slice);
+    }
+
     /// Append a new value to the values array.
     pub fn append(self: *Values, value: Value) !void {
         try self.values.append(value);
@@ -210,55 +213,15 @@ pub const Values = struct {
         try switch(@typeInfo(@TypeOf(value))) {
             // .type => values.append(.{}),
             // .void => values.append(.{}),
-            .bool => self.values.append(.{ .type = .boolean, .inner = .{ .boolean = value }}),
+            .bool => self.appendBool(value),
             // .noreturn => values.append(.{}),
-            .int => |i| switch (i.bits) {
-                0...8 => self.values.append(.{ .type = .byte, .inner = .{ .byte = @as(u8, value) }}),
-                9...16 => self.values.append(.{
-                    .type = if (i.signedness == .signed) .int16 else .uint16,
-                    .inner =
-                        if (i.signedness == .signed) .{ .int16 = @as(i16, value) }
-                        else .{ .uint16 = @as(u16, value) }
-                }),
-                17...32 => self.values.append(.{
-                    .type = if (i.signedness == .signed) .int32 else .uint32,
-                    .inner =
-                        if (i.signedness == .signed) .{ .int32 = @as(i32, value) }
-                        else .{ .uint32 = @as(u32, value) }
-                }),
-                33...64 => self.values.append(.{
-                    .type = if (i.signedness == .signed) .int64 else .uint64,
-                    .inner =
-                        if (i.signedness == .signed) .{ .int64 = @as(i64, value) }
-                        else .{ .uint64 = @as(u64, value) }
-                }),
-                else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
-            },
-            .float => |i| switch (i.bits) {
-                64 => self.values.append(.{ .type = .double, .inner = .{ .double = @as(f64, value) }}),
-                else => @panic("invalid float, floats must be equal to 64 bits (IEEE 574)")
-            },
-            .pointer => |p| switch (p.size) {
-                .one => self.appendAnyType(value.*),
-                .many => {},
-                .slice => blk: {
-                    // TODO: should we assume const u8 slices are strings?
-                    if (p.child == u8 and p.is_const) {
-                        break :blk self.values.append(.{
-                            .type = .string,
-                            .inner = .{ .string = String{ .inner = value } },
-                            .allocated = true,
-                            .slice = value,
-                        });
-                    }
-                    break :blk self.appendSlice(alloc, p.child, value);
-                },
-                .c => {},
-            },
+            .int => self.appendInt(value),
+            .float => self.appendFloat(value),
+            .pointer => self.appendPointer(alloc, value),
             .array => self.appendArray(alloc, value),
             .@"struct" => self.appendStruct(alloc, value),
-            .comptime_float => self.values.append(.{}),
-            .comptime_int => self.values.append(.{}),
+            // .comptime_float => self.values.append(.{}),
+            // .comptime_int => self.values.append(.{}),
             // .undefined => values.append(.{}),
             // .null => values.append(.{}),
             // .optional => values.append(.{}),
@@ -276,25 +239,58 @@ pub const Values = struct {
         };
     }
 
-    pub fn appendSliceOfValues(self: *Self, slice: []const Value) !void {
-        try self.values.appendSlice(slice);
+    pub fn appendBool(self: *Self, value: bool) !void {
+        try self.append(.{ .type = .boolean, .inner = .{ .boolean = value } });
     }
 
-    pub fn fromSliceOfValues(alloc: Allocator, slice: []const Value) !Values {
-        var values = try ArrayList(Value).initCapacity(alloc, slice.len);
-        try values.insertSlice(0, slice);
-        return .{ .values = values };
+    pub fn appendInt(self: *Self, value: anytype) !void {
+        const int_info = @typeInfo(@TypeOf(value));
+        assert(int_info == .int);
+        const i = int_info.int;
+        try self.append(.{
+            .type = TypeSignature.fromType(@TypeOf(value)),
+            .inner = switch (i.bits) {
+                0...8 => .{ .byte = @as(u8, value) },
+                9...16 => if (i.signedness == .unsigned) .{ .uint16 = @as(u16, value) }
+                          else .{ .int16 = @as(i16, value) },
+                17...32 => if (i.signedness == .unsigned) .{ .uint32 = @as(u32, value) }
+                          else .{ .int32 = @as(i32, value) },
+                33...64 => if (i.signedness == .unsigned) .{ .uint64 = @as(u64, value) }
+                          else .{ .int64 = @as(i64, value) },
+                else => @panic("invalid int, ints must be smaller than or equal to 64 bits")
+            },
+        });
     }
 
-    pub fn fromSlice(alloc: Allocator, Child: anytype, slice: []const Child) !Values {
-        var slice_values = Values.init(alloc);
-        for (slice) |item| {
-            try slice_values.appendAnyType(alloc, item);
+    pub fn appendFloat(self: *Self, value: anytype) !void {
+        const float_info = @typeInfo(@TypeOf(value));
+        assert(float_info == .float);
+        try self.append(.{
+            .type = TypeSignature.fromType(@TypeOf(value)),
+            .inner = .{ .double = @as(f64, value) },
+        });
+    }
+
+    pub fn appendPointer(self: *Self, alloc: Allocator, pointer: anytype) !void {
+        const pointer_info = @typeInfo(@TypeOf(pointer));
+        assert(pointer_info == .pointer);
+        switch (pointer_info.pointer.size) {
+            .one => try self.appendAnyType(alloc, pointer.*),
+            .slice => blk: {
+                // TOOD: should we always assume that a slice of const u8 is a string?
+                if (pointer_info.pointer.child == u8 and pointer_info.pointer.is_const) {
+                    try self.values.append(.{
+                        .type = .string,
+                        .inner = .{ .string = String{ .inner = pointer } },
+                        .allocated = true,
+                        .slice = pointer,
+                    });
+                    break :blk;
+                }
+                try self.appendSlice(alloc, pointer_info.pointer.child, pointer);
+            },
+            else => {},
         }
-
-        var values = ArrayList(Value).init(alloc);
-        try values.append(.{ .type = .array, .inner = .{ .array = slice_values }, .contained_sig = "" });
-        return .{ .values = values };
     }
 
     pub fn appendSlice(self: *Self, alloc: Allocator, Child: anytype, slice: []const Child) !void {
@@ -305,25 +301,11 @@ pub const Values = struct {
         for (slice) |item| {
             try slice_values.appendAnyType(alloc, item);
         }
-        try self.values.append(.{
+        try self.append(.{
             .type = .array,
             .inner = .{ .array = slice_values },
             .contained_sig = sig,
         });
-    }
-
-    pub fn fromArray(alloc: Allocator, Child: anytype, array: []const Child) !Values {
-        var array_values = Values.init(alloc);
-        for (array) |item| {
-            try array_values.appendAnyType(alloc, item);
-        }
-        var values = ArrayList(Value).init(alloc);
-        try values.append(.{
-            .type = .array,
-            .inner = .{ .array = array_values },
-            .contained_sig = ""
-        });
-        return .{ .values = values };
     }
 
     pub fn appendArray(self: *Self, alloc: Allocator, array: anytype) !void {
@@ -335,7 +317,7 @@ pub const Values = struct {
         for (array) |item| {
             try array_values.appendAnyType(alloc, item);
         }
-        try self.values.append(.{
+        try self.append(.{
             .type = .array,
             .inner = .{ .array = array_values },
             .contained_sig = sig,
@@ -348,9 +330,12 @@ pub const Values = struct {
         const sig = TypeSignature.signatureFromType(@TypeOf(@"struct"));
 
         var buf = ArrayList(u8).init(alloc);
+        errdefer buf.deinit();
         const buf_writer = buf.writer();
 
         var struct_values = Values.init(alloc);
+        errdefer struct_values.deinit(alloc);
+
         inline for (@typeInfo(@TypeOf(@"struct")).@"struct".fields) |f| {
             const value = @field(@"struct", f.name);
             try struct_values.appendAnyType(alloc, value);
