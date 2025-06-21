@@ -539,14 +539,6 @@ pub const Dbus = struct {
             };
             defer msg.deinit(bus.allocator);
 
-            // TODO remove as user should handle errors
-            if (msg.header.msg_type == .@"error") {
-                log.err(
-                    "client read: error message: {s}",
-                    .{msg.values.?.get(0).?.inner.string.inner}
-                );
-            }
-
             if (bus.read_callback) |cb| cb(bus, &msg);
 
             if (msg.member == null) continue;
@@ -604,14 +596,10 @@ pub const Dbus = struct {
         r: xev.WriteError!usize,
     ) xev.CallbackAction {
         const bus = bus_.?;
-        _ = r catch |err| switch (err) {
-            // TODO: should notify when we get these errors
-            error.BrokenPipe, error.ConnectionResetByPeer => return .disarm,
-            else => {
-                log.err("client write err: {any}", .{err});
-                socket.shutdown(l, c, Dbus, bus, onShutdown);
-                return .disarm;
-            }
+        _ = r catch |err| {
+            log.err("client write err: {any}", .{err});
+            socket.shutdown(l, c, Dbus, bus, onShutdown);
+            return .disarm;
         };
 
         if (bus.write_callback) |cb| cb(bus);

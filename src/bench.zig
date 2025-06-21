@@ -75,9 +75,10 @@ const Server = struct {
     }
 
     pub fn mainThread(self: *Server) !void {
+        const bus_name = "com.dbuz";
         var notifier: Bench = .{};
-        const notifier_iface = BusInterface(Bench).init(&notifier);
-        self.dbus.bind("com.dbuz.Bench", notifier_iface.interface());
+        const notifier_iface = BusInterface(Bench, bus_name).init(&notifier);
+        self.dbus.bind(bus_name ++ ".Bench", notifier_iface.interface());
 
         const c = try self.dbus.completion_pool.create();
         self.shutdown_async.wait(&self.dbus.loop, c, Server, self, shutdownAsyncCallback);

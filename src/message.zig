@@ -78,6 +78,7 @@ pub const Message = struct {
 
     /// name of the error if one occurred
     error_name: ?[]const u8 = null,
+    error_allocated: bool = false,
 
     /// serial this message is a reply to
     reply_serial: ?u32 = null,
@@ -194,6 +195,7 @@ pub const Message = struct {
         if (self.fields_buf) |fields| alloc.free(fields);
         if (self.body_buf) |body| alloc.free(body);
         if (self.values) |*values| values.deinit(alloc);
+        if (self.error_allocated) alloc.free(self.error_name.?);
     }
 
     pub fn appendString(
@@ -359,11 +361,8 @@ pub const Message = struct {
                 try buf_writer.writeByteNTimes(0x00, i);
             }
 
-            if (self.error_name) |error_name| {
-                var err_buf: [256]u8 = undefined;
-                // TODO: get interface from dbus
-                const err = try std.fmt.bufPrint(&err_buf, "com.anunknownalias.Error.{s}", .{error_name});
-                try writeFieldString(.error_name, .string, err, buf.items.len, buf_writer);
+            if (self.error_name) |err_name| {
+                try writeFieldString(.error_name, .string, err_name, buf.items.len, buf_writer);
                 size = buf.items.len;
                 const i = TypeSignature.@"struct".alignOffset(buf.items.len);
                 try buf_writer.writeByteNTimes(0x00, i);

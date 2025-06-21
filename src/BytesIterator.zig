@@ -61,6 +61,7 @@ pub fn peek(self: *Self, T: TypeSignature, t: ?TypeSignature) ?struct{ []const u
             offset + @sizeOf(f64)
         },
         .string, .object_path  => blk: {
+            // TODO: when tests are run in a loop we get index out of bounds
             const slice = self.buffer[alignment..][0..@sizeOf(u32)];
             const len = mem.readInt(u32, slice, .little);
             const ret = self.buffer[alignment+@sizeOf(u32)..][0..len];

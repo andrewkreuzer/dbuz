@@ -34,7 +34,7 @@ pub const Interface = struct {
     }
 };
 
-pub fn BusInterface(comptime T: anytype) type {
+pub fn BusInterface(comptime T: anytype, bus_name: []const u8) type {
     return struct {
         const Self = @This();
 
@@ -224,8 +224,16 @@ pub fn BusInterface(comptime T: anytype) type {
                         },
                         .error_set => |eset| blk: {
                             if (eset) |_| {
+                                const bus_error_prefix = bus_name ++ ".Error.";
+                                const err_name = @errorName(ret);
+
+                                var err = try allocator.alloc(u8, bus_error_prefix.len + err_name.len);
+                                @memcpy(err[0..bus_error_prefix.len], bus_error_prefix);
+                                @memcpy(err[bus_error_prefix.len..], err_name);
+
+                                msg.error_name = err;
+                                msg.error_allocated = true;
                                 msg.header.msg_type = .@"error";
-                                msg.error_name = @errorName(ret);
                                 msg.signature = "s";
                                 break :blk msg.appendString(allocator, .string, @errorName(ret));
                             } else @panic("error_set must be set");
@@ -279,12 +287,13 @@ test "bind" {
     };
 
     var t: Test = .{};
-    server.bind("net.dbuz.Test", BusInterface(Test).init(&t).interface());
+    const bus_name = "net.dbuz.test";
+    server.bind(bus_name ++ ".Test", BusInterface(Test, bus_name).init(&t).interface());
 
     try server.startServer();
     try std.testing.expect(server.state == .ready);
     try std.testing.expect(server.interfaces.count() == 1);
-    try std.testing.expect(server.interfaces.get("net.dbuz.Test") != null);
+    try std.testing.expect(server.interfaces.get("net.dbuz.test.Test") != null);
 
     server.read_callback = struct {
         fn cb(bus: *Dbus, m: *Message) void {
@@ -302,7 +311,7 @@ test "bind" {
 
     var msg = message.NameHasOwner;
     msg.header.serial = 123;
-    try msg.appendString(alloc, .string, "net.dbuz.Test");
+    try msg.appendString(alloc, .string, "net.dbuz.test.Test");
     defer msg.deinit(alloc);
 
     try server.writeMsg(&msg);
@@ -328,7 +337,8 @@ test "call" {
     var server = try Dbus.init(alloc, null);
     defer server.deinit();
 
-    server.bind("net.dbuz.test.Call", BusInterface(Test).init(&t).interface());
+    const bus_name = "net.dbuz.test";
+    server.bind(bus_name ++ ".Call", BusInterface(Test, bus_name).init(&t).interface());
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
@@ -399,7 +409,8 @@ test "return types" {
     var server = try Dbus.init(alloc, null);
     defer server.deinit();
 
-    server.bind("net.dbuz.test.ReturnTypes", BusInterface(Test).init(&t).interface());
+    const bus_name = "net.dbuz.test";
+    server.bind(bus_name ++ ".ReturnTypes", BusInterface(Test, bus_name).init(&t).interface());
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
@@ -650,7 +661,7 @@ test "return types" {
             };
             defer msg.deinit(bus.allocator);
             std.testing.expectEqualStrings(
-                "com.anunknownalias.Error." ++ @errorName(error.Invalid),
+                "net.dbuz.test.Error." ++ @errorName(error.Invalid),
                 msg.error_name.?
             ) catch unreachable;
             return .disarm;
@@ -701,7 +712,7 @@ test "return types" {
             defer msg.deinit(bus.allocator);
             std.testing.expect(msg.error_name != null) catch unreachable;
             std.testing.expectEqualStrings(
-                "com.anunknownalias.Error." ++ @errorName(error.Invalid),
+                "net.dbuz.test.Error." ++ @errorName(error.Invalid),
                 msg.error_name.?
             ) catch unreachable;
             return .disarm;
@@ -712,6 +723,7 @@ test "return types" {
     alloc.free(maybe_err_msg.body_buf.?);
     alloc.free(maybe_err_msg.fields_buf.?);
     maybe_err_msg.values.?.values.items[0].inner.boolean = true;
+
     client.writeMsg(&maybe_err_msg) catch unreachable;
     try client.run(.once);
 
