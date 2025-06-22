@@ -147,6 +147,8 @@ pub const Dbus = struct {
         try bus.hello();
         try bus.requestBoundNames();
         bus.read(null, null);
+        assert(bus.state == .ready);
+        assert(bus.loop.active == 1);
     }
 
     pub fn startServerWithName(bus: *Dbus, name: []const u8) !void {
@@ -177,6 +179,8 @@ pub const Dbus = struct {
         var c: xev.Completion = undefined;
         bus.socket.?.connect(&bus.loop, &c, addr, Dbus, bus, onConnect);
         try bus.loop.run(.once);
+        assert(bus.state == .connected);
+        assert(bus.loop.active == 0);
     }
 
     fn onConnect(
@@ -224,6 +228,8 @@ pub const Dbus = struct {
         try bus.loop.run(.once); // write auth
         try bus.loop.run(.once); // read response
         try bus.loop.run(.once); // write begin
+        assert(bus.state == .authenticated);
+        assert(bus.loop.active == 0);
     }
 
     fn onAuthWrite(
@@ -313,6 +319,8 @@ pub const Dbus = struct {
         bus.write(fbs.getWritten(), onHelloWrite);
         try bus.loop.run(.once); // write hello
         try bus.loop.run(.once); // read hello response
+        assert(bus.state == .ready);
+        assert(bus.loop.active == 0);
     }
 
     fn onHelloWrite(
@@ -440,8 +448,14 @@ pub const Dbus = struct {
                 return .rearm;
             }
         }.cb);
+        // TODO: rewrite this function we need to ignore
+        // signals and errors and confirm the reply
+        // we shouldn't need the third run here
         try bus.run(.once); // write request name
         try bus.run(.once); // read request name response
+        try bus.run(.once);
+        assert(bus.state == .ready);
+        assert(bus.loop.active == 0);
     }
 
     pub fn writeMsg(bus: *Dbus, msg: *Message) !void {
@@ -539,6 +553,8 @@ pub const Dbus = struct {
             };
             defer msg.deinit(bus.allocator);
 
+            if (msg.header.msg_type == .signal) continue;
+
             if (bus.read_callback) |cb| cb(bus, &msg);
 
             if (msg.member == null) continue;
@@ -633,7 +649,9 @@ pub const Dbus = struct {
         socket: Unix,
         r: xev.ShutdownError!void,
     ) xev.CallbackAction {
-        _ = r catch unreachable;
+        _ = r catch |err| {
+            log.err("dbus shutdown err: {any}", .{err});
+        };
         log.debug("dbus shutdown: {any}", .{r});
 
         const bus = bus_.?;
@@ -650,7 +668,9 @@ pub const Dbus = struct {
     ) xev.CallbackAction {
         _ = l;
         _ = socket;
-        _ = r catch unreachable;
+        _ = r catch |err| {
+            log.err("client close err: {any}", .{err});
+        };
         log.debug("client close: {any}", .{r});
 
         bus_.?.completion_pool.destroy(c);
@@ -680,7 +700,7 @@ test "setup and shutdown" {
     try std.testing.expect(server.state == .ready);
 
     server.shutdown();
-    while (server.state != .disconnected) try server.loop.run(.once);
+    try server.run(.until_done);
     try std.testing.expect(server.state == .disconnected);
 }
 
@@ -713,61 +733,15 @@ test "send msg" {
     var client = try Dbus.init(alloc, null);
     defer client.deinit();
     try client.startClient();
+    client.read(null, null);
 
-    const read = struct {
-        fn cb(
-            bus_: ?*Dbus,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: Unix,
-            b: xev.ReadBuffer,
-            r: xev.ReadError!usize,
-        ) xev.CallbackAction {
-            const bus = bus_.?;
-            const n = r catch |err| switch (err) {
-                error.EOF => return .disarm,
-                else => {
-                    log.err("client read err: {any}", .{err});
-                    return .disarm;
-                }
-            };
-
-            if (n < Message.MinimumSize) {
-                log.err(
-                    "client read: to few bytes {d}/{d} of minimum message size",
-                    .{n, Message.MinimumSize}
-                );
-                return .disarm;
-            }
-
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            while (true) {
-                var msg = Message.decode(bus.allocator, fbs.reader()) catch |err| switch (err) {
-                    error.EndOfStream => break,
-                    error.IncompleteMsg => {
-                        log.err("client read: incomplete message", .{});
-                        return .disarm;
-                    },
-                    error.InvalidFields => {
-                        log.err("client read: invalid fields: {s}\n", .{b.slice[0..n]});
-                        return .disarm;
-                    },
-                    else => {
-                        log.err("client read err: {any}", .{err});
-                        return .disarm;
-                    },
-                };
-                defer msg.deinit(bus.allocator);
-
-                if (msg.header.msg_type == .signal) continue;
-                std.testing.expectEqual(.method_return, msg.header.msg_type) catch unreachable;
-                std.testing.expectEqualStrings("/net/dbuz/test/SendMsg", msg.path.?) catch unreachable;
-                std.testing.expectEqualStrings("net.dbuz.test.SendMsg", msg.interface.?) catch unreachable;
-                std.testing.expectEqualStrings("Test", msg.member.?) catch unreachable;
-                std.testing.expectEqual(2, msg.reply_serial.?) catch unreachable;
-            }
-
-            return .disarm;
+    client.read_callback = struct {
+        fn cb(_: *Dbus, m: *Message) void {
+            std.testing.expectEqual(.method_return, m.header.msg_type) catch unreachable;
+            std.testing.expectEqualStrings("/net/dbuz/test/SendMsg", m.path.?) catch unreachable;
+            std.testing.expectEqualStrings("net.dbuz.test.SendMsg", m.interface.?) catch unreachable;
+            std.testing.expectEqualStrings("Test", m.member.?) catch unreachable;
+            std.testing.expectEqual(2, m.reply_serial.?) catch unreachable;
         }
     }.cb;
 
@@ -787,7 +761,6 @@ test "send msg" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, read);
     try client.run(.once);
 
     server.shutdown();

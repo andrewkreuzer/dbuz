@@ -265,30 +265,37 @@ test "bind" {
 
     try server.startServer();
     try std.testing.expect(server.state == .ready);
-    try std.testing.expect(server.interfaces.count() == 1);
+    try std.testing.expectEqual(1, server.interfaces.count());
     try std.testing.expect(server.interfaces.get("net.dbuz.test.Test") != null);
+    try std.testing.expectEqual(1, server.loop.active); // read is active
 
     server.read_callback = struct {
-        fn cb(bus: *Dbus, m: *Message) void {
-            if (m.reply_serial == null) return;
-            if (m.reply_serial != 123) return;
+        fn cb(_: *Dbus, m: *Message) void {
             const name_has_owner = m.values.?
                 .get(0)
                 .?.inner
                 .boolean;
 
             std.testing.expect(name_has_owner) catch unreachable;
-            bus.shutdown();
         }
     }.cb;
 
     var msg = message.NameHasOwner;
-    msg.header.serial = 123;
     try msg.appendString(alloc, .string, "net.dbuz.test.Test");
     defer msg.deinit(alloc);
 
     try server.writeMsg(&msg);
+    try server.run(.once);
+
+    // read is still active
+    try std.testing.expectEqual(1, server.loop.active);
+
+    // read the reply
+    try server.run(.once);
+
+    server.shutdown();
     try server.run(.until_done);
+    try std.testing.expectEqual(.disconnected, server.state);
 }
 
 test "call" {
@@ -379,6 +386,7 @@ test "return types" {
     };
     var t: Test = .{};
 
+    // var server = try Dbus.init(alloc, "/tmp/dbus-ZQ1noXOqVc");
     var server = try Dbus.init(alloc, null);
     defer server.deinit();
 
@@ -387,10 +395,11 @@ test "return types" {
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
-    var client = Dbus.init(alloc, null) catch unreachable;
+    // var client = try Dbus.init(alloc, "/tmp/dbus-ZQ1noXOqVc");
+    var client = try Dbus.init(alloc, null);
     defer client.deinit();
 
-    client.startClient() catch unreachable;
+    try client.startClient();
     try std.testing.expect(client.state == .ready);
 
     var uint32 = Message.init(.{
@@ -408,36 +417,15 @@ test "return types" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, struct {
-        fn cb(
-            bus_: ?*Dbus,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.TCP,
-            b: xev.ReadBuffer,
-            r: xev.ReadError!usize,
-        ) xev.CallbackAction {
-            const bus = bus_.?;
-            const n = r catch |err| switch (err) {
-                error.EOF => return .disarm,
-                else => {
-                    std.testing.expect(false) catch unreachable;
-                    return .disarm;
-                }
-            };
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            var msg = Message.decode(bus.allocator, fbs.reader()) catch {
-                std.testing.expect(false) catch unreachable;
-                return .disarm;
-            };
-            defer msg.deinit(bus.allocator);
+    client.read(null, null);
+    client.read_callback = struct {
+        fn cb(_: *Dbus, m: *Message) void {
             std.testing.expectEqual(
                 42,
-                msg.values.?.get(0).?.inner.uint32,
+                m.values.?.get(0).?.inner.uint32,
             ) catch unreachable;
-            return .disarm;
         }
-    }.cb);
+    }.cb;
     try client.run(.once);
     uint32.deinit(client.allocator);
 
@@ -456,36 +444,14 @@ test "return types" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, struct {
-        fn cb(
-            bus_: ?*Dbus,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.TCP,
-            b: xev.ReadBuffer,
-            r: xev.ReadError!usize,
-        ) xev.CallbackAction {
-            const bus = bus_.?;
-            const n = r catch |err| switch (err) {
-                error.EOF => return .disarm,
-                else => {
-                    std.testing.expect(false) catch unreachable;
-                    return .disarm;
-                }
-            };
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            var msg = Message.decode(bus.allocator, fbs.reader()) catch {
-                std.testing.expect(false) catch unreachable;
-                return .disarm;
-            };
-            defer msg.deinit(bus.allocator);
+    client.read_callback = struct {
+        fn cb(_: *Dbus, m: *Message) void {
             std.testing.expectEqualStrings(
                 "Hello, World!",
-                msg.values.?.get(0).?.inner.string.inner
+                m.values.?.get(0).?.inner.string.inner
             ) catch unreachable;
-            return .disarm;
         }
-    }.cb);
+    }.cb;
     try client.run(.once);
     string.deinit(client.allocator);
 
@@ -504,35 +470,13 @@ test "return types" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, struct {
-        fn cb(
-            bus_: ?*Dbus,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.TCP,
-            b: xev.ReadBuffer,
-            r: xev.ReadError!usize,
-        ) xev.CallbackAction {
-            const bus = bus_.?;
-            const n = r catch |err| switch (err) {
-                error.EOF => return .disarm,
-                else => {
-                    std.testing.expect(false) catch unreachable;
-                    return .disarm;
-                }
-            };
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            var msg = Message.decode(bus.allocator, fbs.reader()) catch {
-                std.testing.expect(false) catch unreachable;
-                return .disarm;
-            };
-            defer msg.deinit(bus.allocator);
+    client.read_callback = struct {
+        fn cb(_: *Dbus, m: *Message) void {
             std.testing.expect(
-                msg.values.?.get(0).?.inner.boolean
+                m.values.?.get(0).?.inner.boolean
             ) catch unreachable;
-            return .disarm;
         }
-    }.cb);
+    }.cb;
     try client.run(.once);
     boolean.deinit(client.allocator);
 
@@ -551,44 +495,22 @@ test "return types" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, struct {
-        fn cb(
-            bus_: ?*Dbus,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.TCP,
-            b: xev.ReadBuffer,
-            r: xev.ReadError!usize,
-        ) xev.CallbackAction {
-            const bus = bus_.?;
-            const n = r catch |err| switch (err) {
-                error.EOF => return .disarm,
-                else => {
-                    std.testing.expect(false) catch unreachable;
-                    return .disarm;
-                }
-            };
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            var msg = Message.decode(bus.allocator, fbs.reader()) catch {
-                std.testing.expect(false) catch unreachable;
-                return .disarm;
-            };
-            defer msg.deinit(bus.allocator);
+    client.read_callback = struct {
+        fn cb(_: *Dbus, m: *Message) void {
             std.testing.expectEqual(
                 1,
-                msg.values.?
+                m.values.?
                 .get(0).?.inner.@"struct"
                 .get(0).?.inner.uint32
             ) catch unreachable;
             std.testing.expectEqual(
                 2,
-                msg.values.?
+                m.values.?
                 .get(0).?.inner.@"struct"
                 .get(1).?.inner.byte
             ) catch unreachable;
-            return .disarm;
         }
-    }.cb);
+    }.cb;
     try client.run(.once);
     structure.deinit(client.allocator);
 
@@ -607,36 +529,14 @@ test "return types" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, struct {
-        fn cb(
-            bus_: ?*Dbus,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.TCP,
-            b: xev.ReadBuffer,
-            r: xev.ReadError!usize,
-        ) xev.CallbackAction {
-            const bus = bus_.?;
-            const n = r catch |err| switch (err) {
-                error.EOF => return .disarm,
-                else => {
-                    std.testing.expect(false) catch unreachable;
-                    return .disarm;
-                }
-            };
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            var msg = Message.decode(bus.allocator, fbs.reader()) catch {
-                std.testing.expect(false) catch unreachable;
-                return .disarm;
-            };
-            defer msg.deinit(bus.allocator);
+    client.read_callback = struct {
+        fn cb(_: *Dbus, m: *Message) void {
             std.testing.expectEqualStrings(
                 "net.dbuz.test.Error." ++ @errorName(error.Invalid),
-                msg.error_name.?
+                m.error_name.?
             ) catch unreachable;
-            return .disarm;
         }
-    }.cb);
+    }.cb;
     try client.run(.once);
     err_msg.deinit(client.allocator);
 
@@ -657,37 +557,15 @@ test "return types" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, struct {
-        fn cb(
-            bus_: ?*Dbus,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.TCP,
-            b: xev.ReadBuffer,
-            r: xev.ReadError!usize,
-        ) xev.CallbackAction {
-            const bus = bus_.?;
-            const n = r catch |err| switch (err) {
-                error.EOF => return .disarm,
-                else => {
-                    std.testing.expect(false) catch unreachable;
-                    return .disarm;
-                }
-            };
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            var msg = Message.decode(bus.allocator, fbs.reader()) catch {
-                std.testing.expect(false) catch unreachable;
-                return .disarm;
-            };
-            defer msg.deinit(bus.allocator);
-            std.testing.expect(msg.error_name != null) catch unreachable;
+    client.read_callback = struct {
+        fn cb(_: *Dbus, m: *Message) void {
+            std.testing.expect(m.error_name != null) catch unreachable;
             std.testing.expectEqualStrings(
                 "net.dbuz.test.Error." ++ @errorName(error.Invalid),
-                msg.error_name.?
+                m.error_name.?
             ) catch unreachable;
-            return .disarm;
         }
-    }.cb);
+    }.cb;
     try client.run(.once);
 
     alloc.free(maybe_err_msg.body_buf.?);
@@ -701,37 +579,15 @@ test "return types" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, struct {
-        fn cb(
-            bus_: ?*Dbus,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.TCP,
-            b: xev.ReadBuffer,
-            r: xev.ReadError!usize,
-        ) xev.CallbackAction {
-            const bus = bus_.?;
-            const n = r catch |err| switch (err) {
-                error.EOF => return .disarm,
-                else => {
-                    std.testing.expect(false) catch unreachable;
-                    return .disarm;
-                }
-            };
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            var msg = Message.decode(bus.allocator, fbs.reader()) catch {
-                std.testing.expect(false) catch unreachable;
-                return .disarm;
-            };
-            defer msg.deinit(bus.allocator);
-            std.testing.expect(msg.error_name == null) catch unreachable;
+    client.read_callback = struct {
+        fn cb(_: *Dbus, m: *Message) void {
+            std.testing.expect(m.error_name == null) catch unreachable;
             std.testing.expectEqual(
                 42,
-                msg.values.?.get(0).?.inner.byte
+                m.values.?.get(0).?.inner.byte
             ) catch unreachable;
-            return .disarm;
         }
-    }.cb);
+    }.cb;
     try client.run(.once);
     maybe_err_msg.deinit(client.allocator);
 
