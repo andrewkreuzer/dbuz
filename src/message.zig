@@ -626,6 +626,14 @@ pub const Message = struct {
         if (n != message.header.fields_len) return error.IncompleteMsg;
         try message.parseFields();
 
+        // align to the start of the body
+        // and confirm padding bytes are zero
+        const sig: TypeSignature = .@"struct";
+        const pad = sig.alignOffset(@sizeOf(Header) + message.header.fields_len);
+        for (0..pad) |_| assert(
+            (reader.readByte() catch return error.InvalidPadding) == 0x00
+        );
+
         if (message.header.body_len == 0
             and message.signature == null
         ) return message;
@@ -637,14 +645,6 @@ pub const Message = struct {
         if (message.header.body_len > 0
             and message.signature == null
         ) return error.InvalidSignature;
-
-        // align to the start of the body
-        // and confirm padding bytes are zero
-        const sig: TypeSignature = .@"struct";
-        const pad = sig.alignOffset(@sizeOf(Header) + message.header.fields_len);
-        for (0..pad) |_| assert(
-            (reader.readByte() catch return error.InvalidPadding) == 0x00
-        );
 
         message.body_buf = try alloc.alloc(u8, message.header.body_len);
         errdefer alloc.free(message.body_buf.?);

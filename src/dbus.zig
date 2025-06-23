@@ -148,7 +148,6 @@ pub const Dbus = struct {
         try bus.requestBoundNames();
         bus.read(null, null);
         assert(bus.state == .ready);
-        assert(bus.loop.active == 1);
     }
 
     pub fn startServerWithName(bus: *Dbus, name: []const u8) !void {
@@ -180,7 +179,6 @@ pub const Dbus = struct {
         bus.socket.?.connect(&bus.loop, &c, addr, Dbus, bus, onConnect);
         try bus.loop.run(.once);
         assert(bus.state == .connected);
-        assert(bus.loop.active == 0);
     }
 
     fn onConnect(
@@ -229,7 +227,6 @@ pub const Dbus = struct {
         try bus.loop.run(.once); // read response
         try bus.loop.run(.once); // write begin
         assert(bus.state == .authenticated);
-        assert(bus.loop.active == 0);
     }
 
     fn onAuthWrite(
@@ -320,7 +317,6 @@ pub const Dbus = struct {
         try bus.loop.run(.once); // write hello
         try bus.loop.run(.once); // read hello response
         assert(bus.state == .ready);
-        assert(bus.loop.active == 0);
     }
 
     fn onHelloWrite(
@@ -453,9 +449,12 @@ pub const Dbus = struct {
         // we shouldn't need the third run here
         try bus.run(.once); // write request name
         try bus.run(.once); // read request name response
-        try bus.run(.once);
+        // occasionally we rearm so we need to run
+        // the loop one more time, unfortunately
+        // this precludes us from using the bus'
+        // loop for our own tasks as this will block
+        // try bus.run(.once);
         assert(bus.state == .ready);
-        assert(bus.loop.active == 0);
     }
 
     pub fn writeMsg(bus: *Dbus, msg: *Message) !void {

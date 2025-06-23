@@ -56,7 +56,7 @@ fn mainAsyncCallback(
 const CompletionPool = MemoryPool(xev.Completion);
 
 const Bench = struct {
-    pub fn run( _: *@This(), _: u32) !u32 {
+    pub fn run( _: *@This()) !u32 {
         return 42;
     }
 };
@@ -130,12 +130,7 @@ const Client = struct {
                 .destination = "com.dbuz.Bench",
                 .member = "Run",
                 .flags = 0x04,
-                .signature = "u",
             });
-
-            // TODO: there is a bug when no arguments are sent
-            // so for now we just send a number
-            try msg.appendNumber(allocator, @as(u32, @intCast(42)));
 
             try dbus.writeMsg(&msg);
             msg.deinit(allocator);
@@ -147,7 +142,7 @@ const Client = struct {
         while (msg_read < msg_count) {
             const c = try completion_pool.create();
             dbus.read(c, readCallback);
-            try dbus.run(.once);
+            try dbus.run(.until_done);
         }
         const t3 = try Instant.now();
 
