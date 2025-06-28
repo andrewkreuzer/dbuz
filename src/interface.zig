@@ -251,6 +251,7 @@ test "bind" {
 
     const alloc = std.testing.allocator;
     const xev = @import("xev");
+
     var thread_pool = xev.ThreadPool.init(.{});
     var server = try Dbus.init(alloc, &thread_pool, null);
     defer server.deinit();
