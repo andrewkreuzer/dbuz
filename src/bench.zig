@@ -26,7 +26,8 @@ pub fn main() !void {
     var loop = try xev.Loop.init(.{});
     defer loop.deinit();
 
-    var server = try Server.init(allocator);
+    var server_thread_pool = xev.ThreadPool.init(.{});
+    var server = try Server.init(allocator, &server_thread_pool);
     const t = try Thread.spawn(.{}, Server.mainThread, .{&server});
 
     var c: xev.Completion = undefined;
@@ -66,9 +67,9 @@ const Server = struct {
     main_async: xev.Async,
     shutdown_async: xev.Async,
 
-    fn init(allocator: Allocator) !Server {
+    fn init(allocator: Allocator, thread_pool: *xev.ThreadPool) !Server {
         return .{
-            .dbus = try Dbus.init(allocator, null),
+            .dbus = try Dbus.init(allocator, thread_pool, null),
             .main_async = try xev.Async.init(),
             .shutdown_async = try xev.Async.init(),
         };
@@ -111,7 +112,8 @@ const Client = struct {
         defer _ = gpa.deinit();
         const allocator = gpa.allocator();
 
-        var dbus = try Dbus.init(allocator, null);
+        var thread_pool = xev.ThreadPool.init(.{});
+        var dbus = try Dbus.init(allocator, &thread_pool, null);
         defer dbus.deinit();
 
         log.info("starting dbus client", .{});

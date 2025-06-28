@@ -32,7 +32,7 @@ pub const Dbus = struct {
     server_address: ?[]const u8 = undefined,
 
     loop: xev.Loop,
-    thread_pool: xev.ThreadPool,
+    thread_pool: ?*xev.ThreadPool,
     completion_pool: CompletionPool,
     read_completion: xev.Completion = undefined,
     write_queue: xev.WriteQueue = .{},
@@ -67,7 +67,7 @@ pub const Dbus = struct {
         ready,
     };
 
-    pub fn init(allocator: Allocator, path: ?[]const u8) !Dbus {
+    pub fn init(allocator: Allocator, thread_pool: ?*xev.ThreadPool, path: ?[]const u8) !Dbus {
         const uid = blk: {
             const u = std.os.linux.getuid();
             if (u == 0) {
@@ -80,15 +80,10 @@ pub const Dbus = struct {
             }
         };
 
-        // io_uring doesn't need a thread pool,
-        // but we'll add one for other backends
-        var thread_pool = xev.ThreadPool.init(.{});
-
         return .{
             .uid = uid,
             .loop = try xev.Loop.init(.{
-                .thread_pool = &thread_pool,
-                .entries = std.math.pow(u13, 2, 12),
+                .thread_pool = thread_pool,
             }),
             .thread_pool = thread_pool,
             .completion_pool = CompletionPool.init(allocator),
@@ -105,8 +100,12 @@ pub const Dbus = struct {
         if (bus.name) |name| bus.allocator.free(name);
         bus.loop.stop();
         bus.loop.deinit();
-        bus.thread_pool.shutdown();
-        bus.thread_pool.deinit();
+
+        if (bus.thread_pool) |pool| {
+            pool.shutdown();
+            pool.deinit();
+        }
+
         bus.interfaces.deinit();
         bus.write_request_pool.deinit();
         bus.write_buffer_pool.deinit();
@@ -410,27 +409,12 @@ pub const Dbus = struct {
                 while (true) {
                     var msg_ = Message.decode(bus_.?.allocator, fbs.reader()) catch |err| switch (err) {
                         error.EndOfStream => break,
-                        error.IncompleteMsg => {
-                            log.err("client request name read err: incomplete message", .{});
-                            return .disarm;
-                        },
-                        error.InvalidFields => {
-                            log.err("client request name read err: invalid fields: {s}\n", .{b.slice[0..n]});
-                            return .disarm;
-                        },
                         else => {
                             log.err("client request name read err: {any}", .{err});
                             return .disarm;
                         },
                     };
                     defer msg_.deinit(bus_.?.allocator);
-
-                    if (msg_.header.msg_type == .@"error") {
-                        log.err(
-                            "client request name read: {s}",
-                            .{msg_.values.?.get(0).?.inner.string.inner}
-                        );
-                    }
 
                     if (msg_.header.msg_type == .signal) continue;
                     switch (msg_.values.?.get(0).?.inner.uint32) {
@@ -685,8 +669,8 @@ test "setup and shutdown" {
     }
 
     const allocator = std.testing.allocator;
-
-    var server = try Dbus.init(allocator, null);
+    var thread_pool = xev.ThreadPool.init(.{});
+    var server = try Dbus.init(allocator, &thread_pool, null);
     defer server.deinit();
 
     try server.connect();
@@ -710,7 +694,8 @@ test "send msg" {
     }
 
     const alloc = std.testing.allocator;
-    var server = try Dbus.init(alloc, null);
+    var server_thread_pool = xev.ThreadPool.init(.{});
+    var server = try Dbus.init(alloc, &server_thread_pool, null);
     defer server.deinit();
 
     try server.startServerWithName("net.dbuz.test.SendMsg");
@@ -729,7 +714,8 @@ test "send msg" {
         }
     }.cb;
 
-    var client = try Dbus.init(alloc, null);
+    var client_thread_pool = xev.ThreadPool.init(.{});
+    var client = try Dbus.init(alloc, &client_thread_pool, null);
     defer client.deinit();
     try client.startClient();
     client.read(null, null);

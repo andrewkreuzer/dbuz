@@ -4,39 +4,35 @@
   inputs = {
     nixpkgs.url      = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url  = "github:numtide/flake-utils";
-    treefmt-nix.url = "github:numtide/treefmt-nix";
     zig.url = "github:mitchellh/zig-overlay";
   };
 
-  outputs = { nixpkgs, zig, flake-utils, ... }:
+  outputs = { nixpkgs, flake-utils, ... } @ inputs:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [];
+        overlays = [
+          (final: prev: {
+            zig = inputs.zig.packages.${prev.system}."0.14.1";
+
+            dbuz = prev.callPackage ./nix/package.nix {};
+          })
+        ];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        meta = {
-          description = "dbus";
-          homepage = "https://github.com/andrewkreuzer/dbuz";
-          license = with pkgs.lib.licenses; [ mit ];
-          maintainers = [{
-            name = "Andrew Kreuzer";
-            email = "me@andrewkreuzer.com";
-            github = "andrewkreuzer";
-            githubId = 17596952;
-          }];
-        };
-      in
-      {
+      in rec {
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            zig.packages.${system}."0.14.1"
+          nativeBuildInputs = with pkgs; [
+            zig
             lldb
             gdb
             linuxKernel.packages.linux_libre.perf
             bpftrace
           ];
         };
+
+        packages.dbuz = pkgs.dbuz;
+        defaultPackage = packages.dbuz;
       }
     );
 }

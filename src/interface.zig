@@ -10,8 +10,6 @@ const StaticStringMap = std.StaticStringMap;
 const Tuple = meta.Tuple;
 const Type = builtin.Type;
 
-const xev = @import("xev");
-
 const message = @import("message.zig");
 const Dbus = @import("dbus.zig").Dbus;
 const Message = message.Message;
@@ -252,7 +250,9 @@ test "bind" {
     }
 
     const alloc = std.testing.allocator;
-    var server = try Dbus.init(alloc, null);
+    const xev = @import("xev");
+    var thread_pool = xev.ThreadPool.init(.{});
+    var server = try Dbus.init(alloc, &thread_pool, null);
     defer server.deinit();
 
     const Test = struct {
@@ -305,6 +305,7 @@ test "call" {
     }
 
     const alloc = std.testing.allocator;
+    const xev = @import("xev");
 
     const Test = struct {
         a: u32 = 0,
@@ -314,7 +315,8 @@ test "call" {
     };
     var t: Test = .{};
 
-    var server = try Dbus.init(alloc, null);
+    var server_thread_pool = xev.ThreadPool.init(.{});
+    var server = try Dbus.init(alloc, &server_thread_pool, null);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
@@ -322,7 +324,8 @@ test "call" {
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
-    var client = Dbus.init(alloc, null) catch unreachable;
+    var client_thread_pool = xev.ThreadPool.init(.{});
+    var client = Dbus.init(alloc, &client_thread_pool, null) catch unreachable;
     defer client.deinit();
 
     client.startClient() catch unreachable;
@@ -361,6 +364,7 @@ test "return types" {
     }
 
     const alloc = std.testing.allocator;
+    const xev = @import("xev");
 
     const Test = struct {
         a: u32 = 0,
@@ -387,7 +391,8 @@ test "return types" {
     var t: Test = .{};
 
     // var server = try Dbus.init(alloc, "/tmp/dbus-ZQ1noXOqVc");
-    var server = try Dbus.init(alloc, null);
+    var server_thread_pool = xev.ThreadPool.init(.{});
+    var server = try Dbus.init(alloc, &server_thread_pool, null);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
@@ -396,7 +401,8 @@ test "return types" {
     try std.testing.expect(server.state == .ready);
 
     // var client = try Dbus.init(alloc, "/tmp/dbus-ZQ1noXOqVc");
-    var client = try Dbus.init(alloc, null);
+    var client_thread_pool = xev.ThreadPool.init(.{});
+    var client = try Dbus.init(alloc, &client_thread_pool, null);
     defer client.deinit();
 
     try client.startClient();
