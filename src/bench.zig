@@ -69,7 +69,7 @@ const Server = struct {
 
     fn init(allocator: Allocator, thread_pool: *xev.ThreadPool) !Server {
         return .{
-            .dbus = try Dbus.init(allocator, thread_pool, null),
+            .dbus = try Dbus.init(allocator, .server, thread_pool, null),
             .main_async = try xev.Async.init(),
             .shutdown_async = try xev.Async.init(),
         };
@@ -81,11 +81,11 @@ const Server = struct {
         const notifier_iface = BusInterface(Bench, bus_name).init(&notifier);
         self.dbus.bind(bus_name ++ ".Bench", notifier_iface.interface());
 
+        try self.dbus.startServer();
+
         const c = try self.dbus.completion_pool.create();
         self.shutdown_async.wait(&self.dbus.loop, c, Server, self, shutdownAsyncCallback);
-        try self.dbus.run(.no_wait);
 
-        try self.dbus.startServer();
         try self.main_async.notify();
         try self.dbus.run(.until_done);
     }
@@ -113,7 +113,7 @@ const Client = struct {
         const allocator = gpa.allocator();
 
         var thread_pool = xev.ThreadPool.init(.{});
-        var dbus = try Dbus.init(allocator, &thread_pool, null);
+        var dbus = try Dbus.init(allocator, .client, &thread_pool, null);
         defer dbus.deinit();
 
         log.info("starting dbus client", .{});

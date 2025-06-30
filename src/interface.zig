@@ -253,7 +253,7 @@ test "bind" {
     const xev = @import("xev");
 
     var thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus.init(alloc, &thread_pool, null);
+    var server = try Dbus.init(alloc, .server, &thread_pool, null);
     defer server.deinit();
 
     const Test = struct {
@@ -296,7 +296,7 @@ test "bind" {
 
     server.shutdown();
     try server.run(.until_done);
-    try std.testing.expectEqual(.disconnected, server.state);
+    try std.testing.expectEqual(.shutdown, server.state);
 }
 
 test "call" {
@@ -317,7 +317,8 @@ test "call" {
     var t: Test = .{};
 
     var server_thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus.init(alloc, &server_thread_pool, null);
+    // var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbus-CGck7lRNYX");
+    var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
@@ -326,10 +327,11 @@ test "call" {
     try std.testing.expect(server.state == .ready);
 
     var client_thread_pool = xev.ThreadPool.init(.{});
-    var client = Dbus.init(alloc, &client_thread_pool, null) catch unreachable;
+    // var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbus-CGck7lRNYX");
+    var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
     defer client.deinit();
 
-    client.startClient() catch unreachable;
+    try client.startClient();
     try std.testing.expect(client.state == .ready);
 
     var msg = Message.init(.{
@@ -341,19 +343,20 @@ test "call" {
         .flags = 0x04,
         .serial = 123,
     });
-    client.writeMsg(&msg) catch unreachable;
+    try client.writeMsg(&msg);
     msg.deinit(client.allocator);
+    try client.run(.once);
 
-    client.run(.once) catch unreachable;
-    server.run(.once) catch unreachable;
+    try server.run(.once);
+    try server.run(.once);
 
     server.shutdown();
-    server.run(.until_done) catch unreachable;
-    try std.testing.expect(server.state == .disconnected);
+    try server.run(.until_done);
+    try std.testing.expect(server.state == .shutdown);
 
     client.shutdown();
-    client.run(.until_done) catch unreachable;
-    try std.testing.expect(client.state == .disconnected);
+    try client.run(.until_done);
+    try std.testing.expect(client.state == .shutdown);
 
     try std.testing.expectEqual(42, t.a);
 }
@@ -391,9 +394,9 @@ test "return types" {
     };
     var t: Test = .{};
 
-    // var server = try Dbus.init(alloc, "/tmp/dbus-ZQ1noXOqVc");
     var server_thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus.init(alloc, &server_thread_pool, null);
+    // var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbus-CZxOpTRMkI");
+    var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
@@ -401,13 +404,14 @@ test "return types" {
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
-    // var client = try Dbus.init(alloc, "/tmp/dbus-ZQ1noXOqVc");
     var client_thread_pool = xev.ThreadPool.init(.{});
-    var client = try Dbus.init(alloc, &client_thread_pool, null);
+    // var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbus-CZxOpTRMkI");
+    var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
     defer client.deinit();
 
     try client.startClient();
     try std.testing.expect(client.state == .ready);
+    client.read(null, null);
 
     var uint32 = Message.init(.{
         .msg_type = .method_call,
@@ -424,7 +428,6 @@ test "return types" {
     try server.run(.once);
     try server.run(.once);
 
-    client.read(null, null);
     client.read_callback = struct {
         fn cb(_: *Dbus, m: *Message) void {
             std.testing.expectEqual(
@@ -599,11 +602,11 @@ test "return types" {
     maybe_err_msg.deinit(client.allocator);
 
     server.shutdown();
-    server.run(.until_done) catch unreachable;
-    try std.testing.expect(server.state == .disconnected);
+    try server.run(.until_done);
+    try std.testing.expect(server.state == .shutdown);
 
     client.shutdown();
-    client.run(.until_done) catch unreachable;
-    try std.testing.expect(client.state == .disconnected);
+    try client.run(.until_done);
+    try std.testing.expect(client.state == .shutdown);
 
 }
