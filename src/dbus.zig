@@ -372,7 +372,6 @@ pub const Dbus = struct {
             };
             defer msg.deinit(bus.allocator);
 
-
             if (msg.header.msg_type == .signal) {
                 if (std.mem.eql(u8, "NameAcquired", msg.member.?)) {
                     bus.name_acquired_signal_received = true;
@@ -384,8 +383,8 @@ pub const Dbus = struct {
                     u8, msg.values.?.values.getLast().inner.string.inner
                 ) catch unreachable;
             }
-
         }
+
         if (!bus.name_acquired_signal_received or bus.name == null)
             return .rearm;
 
@@ -708,7 +707,7 @@ test "setup and shutdown" {
 
     const allocator = std.testing.allocator;
     var thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus.init(allocator, .server, &thread_pool, null);
+    var server = try Dbus.init(allocator, .server, &thread_pool, "/tmp/dbuz/dbus-test");
     defer server.deinit();
 
     try server.connect();
@@ -733,8 +732,8 @@ test "send msg" {
 
     const alloc = std.testing.allocator;
     var server_thread_pool = xev.ThreadPool.init(.{});
-    // var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbus-CGck7lRNYX");
-    var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
+    var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbuz/dbus-test");
+    // var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
     defer server.deinit();
 
     try server.startServerWithName("net.dbuz.test.SendMsg");
@@ -754,8 +753,8 @@ test "send msg" {
     }.cb;
 
     var client_thread_pool = xev.ThreadPool.init(.{});
-    // var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbus-CGck7lRNYX");
-    var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
+    var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbuz/dbus-test");
+    // var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
     defer client.deinit();
     try client.startClient();
     client.read(null, null);

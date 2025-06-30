@@ -2,5 +2,5 @@
 zig-out
 .zig-cache/
 neotest_build.zig
-dbus
+tests/dbus/dbus/
 result

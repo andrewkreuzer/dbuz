@@ -253,7 +253,8 @@ test "bind" {
     const xev = @import("xev");
 
     var thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus.init(alloc, .server, &thread_pool, null);
+    var server = try Dbus.init(alloc, .server, &thread_pool, "/tmp/dbuz/dbus-test");
+    // var server = try Dbus.init(alloc, .server, &thread_pool, null);
     defer server.deinit();
 
     const Test = struct {
@@ -317,8 +318,8 @@ test "call" {
     var t: Test = .{};
 
     var server_thread_pool = xev.ThreadPool.init(.{});
-    // var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbus-CGck7lRNYX");
-    var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
+    var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbuz/dbus-test");
+    // var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
@@ -327,8 +328,8 @@ test "call" {
     try std.testing.expect(server.state == .ready);
 
     var client_thread_pool = xev.ThreadPool.init(.{});
-    // var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbus-CGck7lRNYX");
-    var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
+    var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbuz/dbus-test");
+    // var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
     defer client.deinit();
 
     try client.startClient();
@@ -395,8 +396,8 @@ test "return types" {
     var t: Test = .{};
 
     var server_thread_pool = xev.ThreadPool.init(.{});
-    // var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbus-CZxOpTRMkI");
-    var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
+    var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbuz/dbus-test");
+    // var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
@@ -405,8 +406,8 @@ test "return types" {
     try std.testing.expect(server.state == .ready);
 
     var client_thread_pool = xev.ThreadPool.init(.{});
-    // var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbus-CZxOpTRMkI");
-    var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
+    var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbuz/dbus-test");
+    // var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
     defer client.deinit();
 
     try client.startClient();
