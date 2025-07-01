@@ -54,6 +54,7 @@ pub const Dbus = struct {
     write_buffer_pool: BufferPool,
 
     state: State,
+    err: ?anyerror = null,
 
     interfaces: StringHashMap(Interface) = undefined,
     read_callback: ?*const fn (bus: *Dbus, msg: *Message) void = null,
@@ -67,28 +68,17 @@ pub const Dbus = struct {
     };
 
     const State = enum {
+        shutdown,
         disconnected,
         connecting,
         connected,
         authenticating,
         authenticated,
         ready,
-        shutdown,
     };
 
     pub fn init(allocator: Allocator, bus_type: BusType, thread_pool: ?*xev.ThreadPool, path: ?[]const u8) !Dbus {
-        const uid = blk: {
-            const u = std.os.linux.getuid();
-            if (u == 0) {
-                // we are root, so we'll drop to connect to the session bus
-                // really only included to test with perf
-                try std.posix.setuid(1000);
-                break :blk std.os.linux.getuid();
-            } else {
-                break :blk u;
-            }
-        };
-
+        const uid = std.os.linux.getuid();
         return .{
             .uid = uid,
             .type = bus_type,
@@ -98,7 +88,7 @@ pub const Dbus = struct {
             .thread_pool = thread_pool,
             .completion_pool = CompletionPool.init(allocator),
             .write_request_pool = WriteRequestPool.init(allocator),
-            .path = if (path) |p| p else defaultSocketPath(uid),
+            .path = path orelse defaultSocketPath(uid),
             .allocator = allocator,
             .write_buffer_pool = BufferPool.init(allocator),
             .state = .disconnected,
@@ -180,27 +170,26 @@ pub const Dbus = struct {
         bus.socket = try Unix.init(addr);
 
         assert(bus.socket != null);
-        if (!xev.dynamic) assert(bus.socket.?.fd != -1);
         assert(bus.state == .disconnected);
         bus.state = .connecting;
 
         var c: xev.Completion = undefined;
         bus.socket.?.connect(&bus.loop, &c, addr, Dbus, bus, onConnect);
-        try bus.loop.run(.once);
-        assert(bus.state == .connected);
+        try bus.run(.once);
+        if (bus.err) |e| return e;
     }
 
     fn onConnect(
         bus_: ?*Dbus,
-        l: *xev.Loop,
-        c: *xev.Completion,
-        socket: Unix,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: Unix,
         r: xev.ConnectError!void,
     ) xev.CallbackAction {
         const bus = bus_.?;
         _ = r catch |err| {
             log.err("client connect err: {any}", .{err});
-            socket.shutdown(l, c, Dbus, bus, onShutdown);
+            bus.err = err;
             return .disarm;
         };
 
@@ -232,24 +221,29 @@ pub const Dbus = struct {
         );
 
         bus.write(msg, onAuthWrite);
-        try bus.loop.run(.once); // write auth
-        try bus.loop.run(.once); // read response
-        try bus.loop.run(.once); // write begin
+        while (true) {
+            if (bus.err) |e| return e;
+            switch (bus.state) {
+                .authenticated => break,
+                .authenticating => try bus.loop.run(.once),
+                else => return error.Unexpected,
+            }
+        }
         assert(bus.state == .authenticated);
     }
 
     fn onAuthWrite(
         bus_: ?*Dbus,
-        l: *xev.Loop,
+        _: *xev.Loop,
         c: *xev.Completion,
-        socket: Unix,
+        _: Unix,
         _: xev.WriteBuffer,
         r: xev.WriteError!usize,
     ) xev.CallbackAction {
         const bus = bus_.?;
         _ = r catch |err| {
             log.err("client auth write err: {any}", .{err});
-            socket.shutdown(l, c, Dbus, bus, onShutdown);
+            bus.err = err;
             return .disarm;
         };
 
@@ -272,6 +266,7 @@ pub const Dbus = struct {
         const bus = bus_.?;
         const n = r catch |err| {
             log.err("client auth read err: {any}", .{err});
+            bus.err = err;
             return .disarm;
         };
 
@@ -323,22 +318,28 @@ pub const Dbus = struct {
         try msg.encode(bus.allocator, writer);
 
         bus.write(fbs.getWritten(), onHelloWrite);
-        try bus.loop.run(.once); // write hello
-        while (bus.state != .ready) try bus.loop.run(.once); // read hello response
+        while (true) {
+            if (bus.err) |e| return e;
+            switch (bus.state) {
+                .ready => break,
+                .authenticated => try bus.loop.run(.once),
+                else => return error.Unexpected,
+            }
+        }
     }
 
     fn onHelloWrite(
         bus_: ?*Dbus,
-        l: *xev.Loop,
+        _: *xev.Loop,
         c: *xev.Completion,
-        socket: Unix,
+        _: Unix,
         _: xev.WriteBuffer,
         r: xev.WriteError!usize,
     ) xev.CallbackAction {
         const bus = bus_.?;
         _ = r catch |err| {
             log.err("client hello write err: {any}", .{err});
-            socket.shutdown(l, c, Dbus, bus, onShutdown);
+            bus.err = err;
             return .disarm;
         };
 
@@ -357,6 +358,7 @@ pub const Dbus = struct {
         var bus = bus_.?;
         const n = r catch |err| {
             log.err("client hello read err: {any}", .{err});
+            bus.err = err;
             return .disarm;
         };
 
@@ -722,6 +724,60 @@ test "setup and shutdown" {
     server.shutdown();
     try server.run(.until_done);
     try std.testing.expect(server.state == .shutdown);
+}
+
+test "failed auth disconnect" {
+    const build_options = @import("build_options");
+    if (!build_options.run_integration_tests) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    var thread_pool = xev.ThreadPool.init(.{});
+    var server = try Dbus.init(allocator, .server, &thread_pool, "/tmp/dbuz/dbus-test");
+    defer server.deinit();
+
+    try server.connect();
+    try std.testing.expect(server.state == .connected);
+
+    // set our state to attemp auth but
+    // send garbage so dbus disconnects us
+    server.state = .authenticating;
+    const msg = "garbage";
+
+    server.write(msg, struct {
+        fn cb(
+            _: ?*Dbus,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            _: Unix,
+            _: xev.WriteBuffer,
+            _: xev.WriteError!usize,
+        ) xev.CallbackAction { return .disarm; }
+    }.cb);
+    try server.run(.once);
+
+    // our read should err after dbus disconnects us
+    var c: xev.Completion = undefined;
+    server.read(&c, struct {
+        fn cb(
+            bus_: ?*Dbus,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            _: Unix,
+            _: xev.ReadBuffer,
+            r: xev.ReadError!usize,
+        ) xev.CallbackAction {
+            _ = r catch |err| {
+                bus_.?.err = err;
+            };
+
+            return .disarm;
+        }
+    }.cb);
+    try server.run(.once);
+
+    try std.testing.expect(server.err.? == error.ConnectionResetByPeer);
 }
 
 test "send msg" {
