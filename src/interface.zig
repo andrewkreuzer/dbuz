@@ -16,30 +16,32 @@ const Message = message.Message;
 const TypeSignature = @import("types.zig").TypeSignature;
 const Values = @import("types.zig").Values;
 
-pub const Interface = struct {
-    ptr: *const anyopaque,
-    vtable: *const VTable,
-    const VTable = struct {
-        call: *const fn(*const anyopaque, *Dbus, *const Message) void,
+pub fn Interface(comptime BusType: type) type {
+    return struct {
+        ptr: *const anyopaque,
+        vtable: *const VTable,
+        const VTable = struct {
+            call: *const fn(*const anyopaque, *BusType, *const Message) void,
+        };
+
+        pub fn call(
+            b: *const Interface(BusType),
+            bus: *BusType,
+            msg: *const Message,
+        ) void {
+            return b.vtable.call(b.ptr, bus, msg);
+        }
     };
+}
 
-    pub fn call(
-        b: *const Interface,
-        bus: *Dbus,
-        msg: *const Message,
-    ) void {
-        return b.vtable.call(b.ptr, bus, msg);
-    }
-};
-
-pub fn BusInterface(comptime T: anytype, bus_name: []const u8) type {
+pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []const u8) type {
     return struct {
         const Self = @This();
 
         i: *T,
         comptime methods: StaticStringMap(Method) = methodInfo(),
 
-        const Fn = *const fn(*T, *Dbus, *const Message, ?[]const u8) void;
+        const Fn = *const fn(*T, *BusType, *const Message, ?[]const u8) void;
         const Method = struct{
             name: []const u8,
             member: []const u8,
@@ -51,7 +53,7 @@ pub fn BusInterface(comptime T: anytype, bus_name: []const u8) type {
             return .{.i = i};
         }
 
-        pub fn interface(self: *const Self) Interface {
+        pub fn interface(self: *const Self) Interface(BusType) {
             return .{
                 .ptr = @ptrCast(@alignCast(self)),
                 .vtable = &.{
@@ -67,7 +69,7 @@ pub fn BusInterface(comptime T: anytype, bus_name: []const u8) type {
 
         pub fn call(
             _i: *const anyopaque,
-            bus: *Dbus,
+            bus: *BusType,
             msg: *const Message,
         ) void {
             const i: *const Self = @ptrCast(@alignCast(_i));
@@ -214,7 +216,7 @@ pub fn BusInterface(comptime T: anytype, bus_name: []const u8) type {
                     };
                 }
 
-                fn f(t: *T, bus: *Dbus, msg: *const Message, sig: ?[]const u8) void {
+                fn f(t: *T, bus: *BusType, msg: *const Message, sig: ?[]const u8) void {
                     comptime validate();
                     const args: *Args = @alignCast(@ptrCast(@constCast(msg.body_buf)));
                     if (msg.values) |values| {
@@ -253,8 +255,9 @@ test "bind" {
     const xev = @import("xev");
 
     var thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus.init(alloc, .server, &thread_pool, "/tmp/dbuz/dbus-test");
+    var server = try Dbus(.server).init(alloc, &thread_pool, "/tmp/dbuz/dbus-test");
     // var server = try Dbus.init(alloc, .server, &thread_pool, null);
+    const ServerBus = @TypeOf(server);
     defer server.deinit();
 
     const Test = struct {
@@ -263,7 +266,7 @@ test "bind" {
 
     var t: Test = .{};
     const bus_name = "net.dbuz.test";
-    server.bind(bus_name ++ ".Test", BusInterface(Test, bus_name).init(&t).interface());
+    server.bind(bus_name ++ ".Test", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
 
     try server.startServer();
     try std.testing.expect(server.state == .ready);
@@ -272,7 +275,7 @@ test "bind" {
     try std.testing.expectEqual(1, server.loop.active); // read is active
 
     server.read_callback = struct {
-        fn cb(_: *Dbus, m: *Message) void {
+        fn cb(_: *ServerBus, m: *Message) void {
             const name_has_owner = m.values.?
                 .get(0)
                 .?.inner
@@ -318,17 +321,18 @@ test "call" {
     var t: Test = .{};
 
     var server_thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbuz/dbus-test");
+    var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbuz/dbus-test");
     // var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
+    const ServerBus = @TypeOf(server);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
-    server.bind(bus_name ++ ".Call", BusInterface(Test, bus_name).init(&t).interface());
+    server.bind(bus_name ++ ".Call", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
     var client_thread_pool = xev.ThreadPool.init(.{});
-    var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbuz/dbus-test");
+    var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbuz/dbus-test");
     // var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
     defer client.deinit();
 
@@ -396,18 +400,20 @@ test "return types" {
     var t: Test = .{};
 
     var server_thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus.init(alloc, .server, &server_thread_pool, "/tmp/dbuz/dbus-test");
+    var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbuz/dbus-test");
     // var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
+    const ServerBus = @TypeOf(server);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
-    server.bind(bus_name ++ ".ReturnTypes", BusInterface(Test, bus_name).init(&t).interface());
+    server.bind(bus_name ++ ".ReturnTypes", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
     try server.startServer();
     try std.testing.expect(server.state == .ready);
 
     var client_thread_pool = xev.ThreadPool.init(.{});
-    var client = try Dbus.init(alloc, .client, &client_thread_pool, "/tmp/dbuz/dbus-test");
+    var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbuz/dbus-test");
     // var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
+    const ClientBus = @TypeOf(client);
     defer client.deinit();
 
     try client.startClient();
@@ -430,7 +436,7 @@ test "return types" {
     try server.run(.once);
 
     client.read_callback = struct {
-        fn cb(_: *Dbus, m: *Message) void {
+        fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expectEqual(
                 42,
                 m.values.?.get(0).?.inner.uint32,
@@ -456,7 +462,7 @@ test "return types" {
     try server.run(.once);
 
     client.read_callback = struct {
-        fn cb(_: *Dbus, m: *Message) void {
+        fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expectEqualStrings(
                 "Hello, World!",
                 m.values.?.get(0).?.inner.string.inner
@@ -482,7 +488,7 @@ test "return types" {
     try server.run(.once);
 
     client.read_callback = struct {
-        fn cb(_: *Dbus, m: *Message) void {
+        fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expect(
                 m.values.?.get(0).?.inner.boolean
             ) catch unreachable;
@@ -507,7 +513,7 @@ test "return types" {
     try server.run(.once);
 
     client.read_callback = struct {
-        fn cb(_: *Dbus, m: *Message) void {
+        fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expectEqual(
                 1,
                 m.values.?
@@ -541,7 +547,7 @@ test "return types" {
     try server.run(.once);
 
     client.read_callback = struct {
-        fn cb(_: *Dbus, m: *Message) void {
+        fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expectEqualStrings(
                 "net.dbuz.test.Error." ++ @errorName(error.Invalid),
                 m.error_name.?
@@ -569,7 +575,7 @@ test "return types" {
     try server.run(.once);
 
     client.read_callback = struct {
-        fn cb(_: *Dbus, m: *Message) void {
+        fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expect(m.error_name != null) catch unreachable;
             std.testing.expectEqualStrings(
                 "net.dbuz.test.Error." ++ @errorName(error.Invalid),
@@ -591,7 +597,7 @@ test "return types" {
     try server.run(.once);
 
     client.read_callback = struct {
-        fn cb(_: *Dbus, m: *Message) void {
+        fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expect(m.error_name == null) catch unreachable;
             std.testing.expectEqual(
                 42,

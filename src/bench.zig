@@ -63,13 +63,13 @@ const Bench = struct {
 };
 
 const Server = struct {
-    dbus: Dbus,
+    dbus: Dbus(.server),
     main_async: xev.Async,
     shutdown_async: xev.Async,
 
     fn init(allocator: Allocator, thread_pool: *xev.ThreadPool) !Server {
         return .{
-            .dbus = try Dbus.init(allocator, .server, thread_pool, null),
+            .dbus = try Dbus(.server).init(allocator, thread_pool, null),
             .main_async = try xev.Async.init(),
             .shutdown_async = try xev.Async.init(),
         };
@@ -78,7 +78,7 @@ const Server = struct {
     pub fn mainThread(self: *Server) !void {
         const bus_name = "com.dbuz";
         var notifier: Bench = .{};
-        const notifier_iface = BusInterface(Bench, bus_name).init(&notifier);
+        const notifier_iface = BusInterface(@TypeOf(self.dbus), Bench, bus_name).init(&notifier);
         self.dbus.bind(bus_name ++ ".Bench", notifier_iface.interface());
 
         try self.dbus.startServer();
@@ -113,7 +113,7 @@ const Client = struct {
         const allocator = gpa.allocator();
 
         var thread_pool = xev.ThreadPool.init(.{});
-        var dbus = try Dbus.init(allocator, .client, &thread_pool, null);
+        var dbus = try Dbus(.client).init(allocator, &thread_pool, null);
         defer dbus.deinit();
 
         log.info("starting dbus client", .{});
@@ -166,7 +166,7 @@ const Client = struct {
     var msg_read: u32 = 0;
 
     fn readCallback(
-        bus_: ?*Dbus,
+        bus_: ?*Dbus(.client),
         _: *xev.Loop,
         c: *xev.Completion,
         _: xev.TCP,
