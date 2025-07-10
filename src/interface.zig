@@ -255,8 +255,8 @@ test "bind" {
     const xev = @import("xev");
 
     var thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus(.server).init(alloc, &thread_pool, "/tmp/dbuz/dbus-test");
-    // var server = try Dbus.init(alloc, .server, &thread_pool, null);
+    // var server = try Dbus(.server).init(alloc, &thread_pool, "/tmp/dbus-test");
+    var server = try Dbus(.server).init(alloc, &thread_pool, null);
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
@@ -266,9 +266,9 @@ test "bind" {
 
     var t: Test = .{};
     const bus_name = "net.dbuz.test";
-    server.bind(bus_name ++ ".Test", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
+    try server.bind(bus_name ++ ".Test", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
+    try server.start(.{});
 
-    try server.startServer();
     try std.testing.expect(server.state == .ready);
     try std.testing.expectEqual(1, server.interfaces.count());
     try std.testing.expect(server.interfaces.get("net.dbuz.test.Test") != null);
@@ -298,9 +298,9 @@ test "bind" {
     // read the reply
     try server.run(.once);
 
-    server.shutdown();
+    try server.shutdown();
     try server.run(.until_done);
-    try std.testing.expectEqual(.shutdown, server.state);
+    try std.testing.expectEqual(.disconnected, server.state);
 }
 
 test "call" {
@@ -321,22 +321,22 @@ test "call" {
     var t: Test = .{};
 
     var server_thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbuz/dbus-test");
-    // var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
+    // var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbus-test");
+    var server = try Dbus(.server).init(alloc, &server_thread_pool, null);
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
-    server.bind(bus_name ++ ".Call", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
-    try server.startServer();
+    try server.bind(bus_name ++ ".Call", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
+    try server.start(.{});
     try std.testing.expect(server.state == .ready);
 
     var client_thread_pool = xev.ThreadPool.init(.{});
-    var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbuz/dbus-test");
-    // var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
+    // var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbus-test");
+    var client = try Dbus(.client).init(alloc, &client_thread_pool, null);
     defer client.deinit();
 
-    try client.startClient();
+    try client.start(.{});
     try std.testing.expect(client.state == .ready);
 
     var msg = Message.init(.{
@@ -355,13 +355,13 @@ test "call" {
     try server.run(.once);
     try server.run(.once);
 
-    server.shutdown();
+    try server.shutdown();
     try server.run(.until_done);
-    try std.testing.expect(server.state == .shutdown);
+    try std.testing.expect(server.state == .disconnected);
 
-    client.shutdown();
+    try client.shutdown();
     try client.run(.until_done);
-    try std.testing.expect(client.state == .shutdown);
+    try std.testing.expect(client.state == .disconnected);
 
     try std.testing.expectEqual(42, t.a);
 }
@@ -400,25 +400,24 @@ test "return types" {
     var t: Test = .{};
 
     var server_thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbuz/dbus-test");
-    // var server = try Dbus.init(alloc, .server, &server_thread_pool, null);
+    // var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbus-test");
+    var server = try Dbus(.server).init(alloc, &server_thread_pool, null);
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
     const bus_name = "net.dbuz.test";
-    server.bind(bus_name ++ ".ReturnTypes", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
-    try server.startServer();
+    try server.bind(bus_name ++ ".ReturnTypes", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
+    try server.start(.{});
     try std.testing.expect(server.state == .ready);
 
     var client_thread_pool = xev.ThreadPool.init(.{});
-    var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbuz/dbus-test");
-    // var client = try Dbus.init(alloc, .client, &client_thread_pool, null);
+    // var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbus-test");
+    var client = try Dbus(.client).init(alloc, &client_thread_pool, null);
     const ClientBus = @TypeOf(client);
     defer client.deinit();
 
-    try client.startClient();
+    try client.start(.{.start_read = true});
     try std.testing.expect(client.state == .ready);
-    client.read(null, null);
 
     var uint32 = Message.init(.{
         .msg_type = .method_call,
@@ -608,12 +607,12 @@ test "return types" {
     try client.run(.once);
     maybe_err_msg.deinit(client.allocator);
 
-    server.shutdown();
+    try server.shutdown();
     try server.run(.until_done);
-    try std.testing.expect(server.state == .shutdown);
+    try std.testing.expect(server.state == .disconnected);
 
-    client.shutdown();
+    try client.shutdown();
     try client.run(.until_done);
-    try std.testing.expect(client.state == .shutdown);
+    try std.testing.expect(client.state == .disconnected);
 
 }

@@ -18,6 +18,8 @@ pub const std_options: std.Options = .{
     .log_level = .err,
 };
 
+const MSG_COUNT = 10 * 1000;
+
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -33,7 +35,7 @@ pub fn main() !void {
     var c: xev.Completion = undefined;
     server.main_async.wait(&loop, &c, Server, &server, mainAsyncCallback);
 
-    try loop.run(.once);
+    try loop.run(.until_done);
     t.join();
 }
 
@@ -79,9 +81,10 @@ const Server = struct {
         const bus_name = "com.dbuz";
         var notifier: Bench = .{};
         const notifier_iface = BusInterface(@TypeOf(self.dbus), Bench, bus_name).init(&notifier);
-        self.dbus.bind(bus_name ++ ".Bench", notifier_iface.interface());
+        try self.dbus.bind(bus_name ++ ".Bench", notifier_iface.interface());
 
-        try self.dbus.startServer();
+        std.debug.print("starting dbus server\n", .{});
+        try self.dbus.start(.{});
 
         const c = try self.dbus.completion_pool.create();
         self.shutdown_async.wait(&self.dbus.loop, c, Server, self, shutdownAsyncCallback);
@@ -99,7 +102,7 @@ const Server = struct {
         _ = r catch unreachable;
         if (s) |server| {
             server.dbus.completion_pool.destroy(c);
-            server.dbus.shutdown();
+            server.dbus.shutdown() catch unreachable;
             server.dbus.deinit();
         }
         return .disarm;
@@ -116,15 +119,14 @@ const Client = struct {
         var dbus = try Dbus(.client).init(allocator, &thread_pool, null);
         defer dbus.deinit();
 
-        log.info("starting dbus client", .{});
-        try dbus.startClient();
+        std.debug.print("starting dbus client\n", .{});
+        try dbus.start(.{});
 
         var completion_pool = CompletionPool.init(allocator);
         defer completion_pool.deinit();
 
         const t1 = try Instant.now();
-        const msg_count = 10 * 1000;
-        for (0..msg_count) |_| {
+        for (0..MSG_COUNT) |_| {
             var msg = Message.init(.{
                 .msg_type = .method_call,
                 .path = "/com/dbuz/Bench",
@@ -141,26 +143,27 @@ const Client = struct {
 
         const t2 = try Instant.now();
 
-        while (msg_read < msg_count) {
+        while (msg_read < MSG_COUNT) {
             const c = try completion_pool.create();
             dbus.read(c, readCallback);
             try dbus.run(.until_done);
         }
         const t3 = try Instant.now();
 
-        dbus.shutdown();
+        try dbus.shutdown();
         try dbus.run(.until_done);
 
         const write_time = @as(f64, @floatFromInt(t2.since(t1)));
         const read_time = @as(f64, @floatFromInt(t3.since(t2)));
         const total_time = @as(f64, @floatFromInt(t3.since(t1)));
+        std.debug.print("\n", .{});
         std.debug.print("client completed {d} msgs\n", .{msg_read});
         std.debug.print("client write time {d:.2} seconds\n", .{write_time / 1e9});
-        std.debug.print("client write msg/s {d:.2}\n", .{msg_count / (write_time / 1e9)});
+        std.debug.print("client write msg/s {d:.2}\n", .{MSG_COUNT / (write_time / 1e9)});
         std.debug.print("client read time {d:.2} seconds\n", .{read_time / 1e9});
-        std.debug.print("client read msg/s {d:.2}\n", .{msg_count / (read_time / 1e9)});
+        std.debug.print("client read msg/s {d:.2}\n", .{MSG_COUNT / (read_time / 1e9)});
         std.debug.print("client total time {d:.2} seconds\n", .{total_time / 1e9});
-        std.debug.print("client total msg/s {d:.2}\n", .{msg_count / (total_time / 1e9)});
+        std.debug.print("client total msg/s {d:.2}\n", .{MSG_COUNT / (total_time / 1e9)});
     }
 
     var msg_read: u32 = 0;
@@ -186,7 +189,7 @@ const Client = struct {
             var msg = Message.decode(bus_.?.allocator, fbs.reader()) catch |err| switch (err) {
                 error.EndOfStream => break,
                 error.InvalidFields => {
-                    std.debug.print("buf slice: {s}\n", .{b.slice[0..n]});
+                    log.err("buf slice: {s}\n", .{b.slice[0..n]});
                     return .disarm;
                 },
                 else => {
@@ -205,13 +208,13 @@ const Client = struct {
                 },
                 .@"error" => {
                     if (msg.signature) |sig| {
-                        std.debug.print("error sig: {s}\n", .{sig});
+                        log.err("error sig: {s}\n", .{sig});
                     }
-                    std.debug.print("error: {s}\n", .{msg.body_buf.?});
+                    log.err("error: {s}\n", .{msg.body_buf.?});
                 },
                 .signal => {},
                 else => {
-                    std.debug.print("unexpected msg: {s}\n", .{msg.body_buf.?});
+                    log.err("unexpected msg: {s}\n", .{msg.body_buf.?});
                 },
             }
             msg_read += 1;

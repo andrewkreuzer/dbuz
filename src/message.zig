@@ -214,7 +214,7 @@ pub const Message = struct {
         T: TypeSignature,
         value: []const u8
     ) !void {
-        assert(@TypeOf(value) == []const u8);
+        assert(T == .string or T == .object_path or T == .signature);
         var values = self.values orelse Values.init(alloc);
         const v: Value = switch (T) {
             .string => .{ .type = T, .inner = .{ .string = .{ .inner = value } } },
