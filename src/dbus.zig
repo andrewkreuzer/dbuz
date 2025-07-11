@@ -60,9 +60,12 @@ pub fn Dbus(comptime bus_type: BusType) type {
         loop: xev.Loop,
         thread_pool: ?*xev.ThreadPool,
         completion_pool: CompletionPool,
+
         read_completion: xev.Completion = undefined,
         write_queue: xev.WriteQueue = .{},
         write_request_pool: WriteRequestPool,
+
+        shutdown_async: xev.Async,
         shutdown_completion: xev.Completion = undefined,
 
         allocator: Allocator,
@@ -116,6 +119,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 .path = path orelse defaultSocketPath(uid),
                 .allocator = allocator,
                 .write_buffer_pool = BufferPool.init(allocator),
+                .shutdown_async = try xev.Async.init(),
                 .state = .disconnected,
                 .interfaces = StringHashMap(Interface(Bus)).init(allocator),
                 .method_handles = StringHashMap(*const fn (bus: *Bus, msg: *Message) void).init(allocator),
@@ -244,6 +248,14 @@ pub fn Dbus(comptime bus_type: BusType) type {
                     assert(bus.state == .ready);
                     assert(bus.server_id != null);
                     assert(bus.name != null);
+
+                    bus.shutdown_async.wait(
+                        &bus.loop,
+                        &bus.shutdown_completion,
+                        Bus,
+                        bus,
+                        shutdownAsyncCallback
+                    );
 
                     if (bus_type == .server) {
                         try bus.requestBoundNames();
@@ -782,6 +794,11 @@ pub fn Dbus(comptime bus_type: BusType) type {
             return .disarm;
         }
 
+        pub fn shutdown(bus: *Bus) !void {
+            log.debug("dbus shutting down", .{});
+            try bus.shutdown_async.notify();
+        }
+
         pub fn shutdownAsyncCallback(
             bus_: ?*Bus,
             _: *xev.Loop,
@@ -803,21 +820,6 @@ pub fn Dbus(comptime bus_type: BusType) type {
             );
 
             return .disarm;
-        }
-
-        pub fn shutdown(bus: *Bus) !void {
-            if (bus.state == .disconnected) return;
-            assert(bus.socket != null);
-            assert(@intFromEnum(bus.state) > @intFromEnum(State.connected));
-
-            const c = try bus.completion_pool.create();
-            bus.socket.?.shutdown(
-                &bus.loop,
-                c,
-                Bus,
-                bus,
-                onShutdown,
-            );
         }
 
         fn onShutdown(
@@ -852,10 +854,10 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 log.err("dbus socket close err: {any}", .{e});
             };
 
-            log.debug("dbus socket closed: {any}", .{r});
-            bus_.?.completion_pool.destroy(c);
-            bus_.?.state = .disconnected;
-            bus_.?.socket = null;
+            log.debug("dbus socket closed\n", .{});
+            bus.completion_pool.destroy(c);
+            bus.state = .disconnected;
+            bus.socket = null;
             return .disarm;
         }
     };
@@ -884,6 +886,15 @@ test "setup and shutdown" {
     server.state = .hello;
     try server.sendHello();
     try std.testing.expect(server.state == .ready);
+
+    // TODO: not ideal
+    server.shutdown_async.wait(
+        &server.loop,
+        &server.shutdown_completion,
+        @TypeOf(server),
+        &server,
+        Dbus(.server).shutdownAsyncCallback
+    );
 
     try server.shutdown();
     try server.run(.until_done);

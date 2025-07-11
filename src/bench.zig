@@ -30,6 +30,7 @@ pub fn main() !void {
 
     var server_thread_pool = xev.ThreadPool.init(.{});
     var server = try Server.init(allocator, &server_thread_pool);
+    defer server.dbus.deinit();
     const t = try Thread.spawn(.{}, Server.mainThread, .{&server});
 
     var c: xev.Completion = undefined;
@@ -49,7 +50,7 @@ fn mainAsyncCallback(
     Client.run() catch |err| {
         log.err("client run error: {any}", .{err});
     };
-    s.?.shutdown_async.notify() catch |err| {
+    s.?.dbus.shutdown_async.notify() catch |err| {
         log.err("shutdown notify error: {any}", .{err});
     };
 
@@ -67,13 +68,11 @@ const Bench = struct {
 const Server = struct {
     dbus: Dbus(.server),
     main_async: xev.Async,
-    shutdown_async: xev.Async,
 
     fn init(allocator: Allocator, thread_pool: *xev.ThreadPool) !Server {
         return .{
             .dbus = try Dbus(.server).init(allocator, thread_pool, null),
             .main_async = try xev.Async.init(),
-            .shutdown_async = try xev.Async.init(),
         };
     }
 
@@ -86,26 +85,8 @@ const Server = struct {
         std.debug.print("starting dbus server\n", .{});
         try self.dbus.start(.{});
 
-        const c = try self.dbus.completion_pool.create();
-        self.shutdown_async.wait(&self.dbus.loop, c, Server, self, shutdownAsyncCallback);
-
         try self.main_async.notify();
         try self.dbus.run(.until_done);
-    }
-
-    fn shutdownAsyncCallback(
-        s: ?*Server,
-        _: *xev.Loop,
-        c: *xev.Completion,
-        r: xev.Async.WaitError!void,
-    ) xev.CallbackAction {
-        _ = r catch unreachable;
-        if (s) |server| {
-            server.dbus.completion_pool.destroy(c);
-            server.dbus.shutdown() catch unreachable;
-            server.dbus.deinit();
-        }
-        return .disarm;
     }
 };
 
@@ -146,7 +127,7 @@ const Client = struct {
         while (msg_read < MSG_COUNT) {
             const c = try completion_pool.create();
             dbus.read(c, readCallback);
-            try dbus.run(.until_done);
+            try dbus.run(.once);
         }
         const t3 = try Instant.now();
 
