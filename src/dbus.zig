@@ -92,7 +92,9 @@ pub fn Dbus(comptime bus_type: BusType) type {
         interfaces: StringHashMap(Interface(Bus)),
 
         // A map of method handles, these are functions that are called when a
-        // message with a matching method name is received.
+        // message with a matching method name is received. Our methods are a
+        // map on the key of the full interface and member string, this way we
+        // can store different interfaces in the same map
         method_handles: StringHashMap(*const fn (bus: *Bus, msg: *Message) void),
 
         // Callbacks for read and write operations, can be set by the user to
@@ -677,15 +679,12 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 if (msg.header.msg_type == .signal) continue;
 
                 // these fields are required in order to determine
-                // which functions to fire and where so we continue
-                // if they're not found
+                // which functions to fire and where, so we skip
+                // the message if they're not found
                 const iface = msg.interface orelse continue;
                 const member = msg.member orelse continue;
                 const method_parts = [_][]const u8{iface, ".", member};
 
-                // our methods are a map on the key of the full
-                // intercace and member string, this way we can
-                // store different interfaces in the same map
                 const method = std.mem.join(
                     bus.allocator,
                     "",
@@ -883,6 +882,40 @@ pub fn Dbus(comptime bus_type: BusType) type {
             return .disarm;
         }
     };
+}
+
+test Dbus {
+    // only included to avoid failed test runs on 
+    // systems without dbus
+    const build_options = @import("build_options");
+    if (!build_options.run_integration_tests) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    var thread_pool = xev.ThreadPool.init(.{});
+    var server = try Dbus(.server).init(allocator, &thread_pool, null);
+    defer server.deinit();
+
+    try server.setMethodHandle("net.dbuz.example.Echo", struct {
+        fn cb(bus: *Dbus(.server), m: *Message) void {
+            var echo = m.*;
+            defer echo.deinit(bus.allocator);
+            echo.header.msg_type = .method_return;
+            echo.destination = m.sender;
+            echo.sender = m.destination;
+            echo.reply_serial = m.header.serial;
+            echo.header.flags = 0x01;
+            bus.writeMsg(&echo) catch unreachable;
+        }
+    }.cb);
+
+    try server.start(.{});
+    // you should use the appropriate run mode, we use no_wait
+    // as we aren't sending any messages to this server so once,
+    // or until_done would block
+    try server.run(.no_wait);
+    try server.shutdown();
 }
 
 test "setup and shutdown" {

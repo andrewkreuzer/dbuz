@@ -68,46 +68,13 @@ pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []con
         }
 
         pub fn call(
-            _i: *const anyopaque,
+            i_: *const anyopaque,
             bus: *BusType,
             msg: *const Message,
         ) void {
-            const i: *const Self = @ptrCast(@alignCast(_i));
+            const i: *const Self = @ptrCast(@alignCast(i_));
             const m = i.method(msg.member.?) orelse return;
             return m.@"fn"(i.i, bus, msg, m.return_sig);
-        }
-
-        fn count(name: []const u8) usize {
-            var i: usize = 0;
-            for (name) |c| {
-                if (c != '_') i += 1;
-            }
-            return i;
-        }
-
-        fn convertName(name: [:0]const u8) *const [count(name):0]u8 {
-            comptime {
-                var out: [count(name):0]u8 = undefined;
-
-                var i: usize = 0;
-                var j: usize = 0;
-                while (i < out.len) {
-                    if (i == 0) {
-                        out[i] = toUpper(name[j]);
-                    } else if (name[j] == '_') {
-                        j += 1;
-                        out[i] = toUpper(name[j]);
-                    } else {
-                        out[i] = name[j];
-                    }
-
-                    i += 1;
-                    j += 1;
-                }
-
-                const final = out;
-                return &final;
-            }
         }
 
         fn methodInfo() StaticStringMap(Method) {
@@ -166,27 +133,57 @@ pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []con
                 const ReturnType = fn_info.@"fn".return_type.?;
                 const return_info = @typeInfo(ReturnType);
 
-                fn validate() void {
-                    if (fn_info != .@"fn") {
-                        @compileError("invalid function type");
+                fn f(t: *T, bus: *BusType, msg: *const Message, sig: ?[]const u8) void {
+                    comptime {
+                        if (fn_info != .@"fn") @compileError("invalid function type");
+                        if (fn_params.len == 0 or fn_params[0].type != *T) {
+                            @compileError(
+                                "invalid function, "
+                                ++ name ++ "(...)"
+                                ++ " must be method of " ++ @typeName(*T)
+                            );
+                        }
+
+                        if (args_type_info != .@"struct") {
+                            @compileError(
+                                "expected tuple or struct argument, found "
+                                ++ @typeName(Args)
+                            );
+                        }
+
+                        if (args_fields_info.len + 1 != fn_params.len) {
+                            @compileError(
+                                "missmatch number of arguments, expected "
+                                ++ std.fmt.comptimePrint("{d}", .{fn_params.len})
+                                ++ ", found "
+                                ++ std.fmt.comptimePrint("{d}", .{args_fields_info.len + 1})
+                            );
+                        }
                     }
 
-                    if (fn_params.len == 0 or fn_params[0].type != *T) {
-                        @compileError(
-                            "invalid function, " ++ name ++ "(...)"
-                            ++ " must be method of " ++ @typeName(*T)
-                        );
+                    // TODO: needs more testing to ensure
+                    // all types can be casted from raw bytes
+                    const args: *Args = @alignCast(@ptrCast(@constCast(msg.body_buf)));
+                    if (msg.values) |values| {
+                        assert(values.values.items.len == args.len);
                     }
 
-                    if (args_type_info != .@"struct") {
-                        @compileError("expected tuple or struct argument, found " ++ @typeName(Args));
-                    }
+                    const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
 
-                    if (args_fields_info.len + 1 != fn_params.len) {
-                        @compileError("missmatch number of arguments, expected " ++
-                            std.fmt.comptimePrint("{d}", .{fn_params.len}) ++
-                            ", found " ++ std.fmt.comptimePrint("{d}", .{args_fields_info.len + 1}));
-                    }
+                    var return_msg = Message.init(.{
+                        .msg_type = .method_return,
+                        .destination = msg.sender,
+                        .sender = msg.destination,
+                        .reply_serial = msg.header.serial,
+                        .flags = 0x01,
+                        .signature = sig,
+                    });
+                    defer return_msg.deinit(bus.allocator);
+                    appendReturnValue(ReturnType, ret, bus.allocator, &return_msg) catch {
+                        log.err("failed to append return value", .{});
+                    };
+
+                    bus.writeMsg(&return_msg) catch log.err("failed to write message", .{});
                 }
 
                 fn appendReturnValue(R: type, ret: R, allocator: Allocator, msg: *Message) !void {
@@ -212,38 +209,44 @@ pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []con
                             } else @compileError("interface return error_set must not be null");
                         },
                         else => @compileError("unsupported interface return type " ++ @typeName(R))
-
                     };
                 }
 
-                fn f(t: *T, bus: *BusType, msg: *const Message, sig: ?[]const u8) void {
-                    comptime validate();
-                    const args: *Args = @alignCast(@ptrCast(@constCast(msg.body_buf)));
-                    if (msg.values) |values| {
-                        assert(values.values.items.len == args.len);
-                    }
-
-                    const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
-
-                    var return_msg = Message.init(.{
-                        .msg_type = .method_return,
-                        .destination = msg.sender,
-                        .sender = msg.destination,
-                        .reply_serial = msg.header.serial,
-                        .flags = 0x01,
-                        .signature = sig,
-                    });
-                    defer return_msg.deinit(bus.allocator);
-                    appendReturnValue(ReturnType, ret, bus.allocator, &return_msg) catch {
-                        log.err("failed to append return value", .{});
-                    };
-
-                    bus.writeMsg(&return_msg) catch log.err("failed to write message", .{});
-                }
             }.f;
         }
     };
 }
+
+fn count(name: []const u8) usize {
+    var i: usize = 0;
+    for (name) |c| {
+        if (c != '_') i += 1;
+    }
+    return i;
+}
+
+fn convertName(name: [:0]const u8) *const [count(name):0]u8 {
+    comptime {
+        var out: [count(name):0]u8 = undefined;
+        var i: usize = 0;
+        var j: usize = 0;
+        while (i < out.len) {
+            if (i == 0) {
+                out[i] = toUpper(name[j]);
+            } else if (name[j] == '_') {
+                j += 1;
+                out[i] = toUpper(name[j]);
+            } else {
+                out[i] = name[j];
+            }
+            i += 1;
+            j += 1;
+        }
+        const final = out;
+        return &final;
+    }
+}
+
 
 test "bind" {
     const build_options = @import("build_options");

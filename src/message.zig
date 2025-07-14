@@ -34,7 +34,7 @@ pub const RequestName = Message.init(.{
     .flags = 0x04
 });
 
-pub var NameHasOwner = Message.init(.{
+pub const NameHasOwner = Message.init(.{
     .msg_type = .method_call,
     .path = "/org/freedesktop/DBus",
     .interface = "org.freedesktop.DBus",

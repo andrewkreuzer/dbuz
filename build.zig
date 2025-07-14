@@ -19,6 +19,15 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
+    const lib_docs = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .{ .custom = ".." },
+        .install_subdir = "docs",
+    });
+
+    const docs_step = b.step("docs", "Generate library documentation");
+    docs_step.dependOn(&lib_docs.step);
+
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("src/bench.zig"),
         .target = target,
