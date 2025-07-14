@@ -17,14 +17,16 @@ const message = @import("message.zig");
 const Hello = message.Hello;
 const Interface = interface.Interface;
 const Message = message.Message;
-const Value = message.Value;
+const Queue = @import("queue.zig").Queue;
 
 // TODO:
 // maximum size of a dbus message is 128MiB
 const MAX_BUFFER_SIZE = 128 * 1024;
+const MAX_QUEUE_SIZE = 512;
 const BufferPool = MemoryPool([MAX_BUFFER_SIZE]u8);
 const CompletionPool = MemoryPool(xev.Completion);
 const WriteRequestPool = MemoryPool(xev.WriteRequest);
+const MessagePool = MemoryPool(Message);
 
 pub const BusType = enum {
     client,
@@ -78,6 +80,9 @@ pub fn Dbus(comptime bus_type: BusType) type {
         read_buffer: [MAX_BUFFER_SIZE]u8 = undefined,
         write_buffer_pool: BufferPool,
 
+        message_queue: Queue(Message),
+        message_pool: MessagePool,
+
         state: State,
         connection_attempts: u8 = 0,
         max_connection_attempts: u8 = 3,
@@ -112,14 +117,16 @@ pub fn Dbus(comptime bus_type: BusType) type {
             return .{
                 .type = bus_type,
                 .uid = uid,
+                .path = path orelse defaultSocketPath(uid),
                 .loop = try xev.Loop.init(.{ .thread_pool = thread_pool }),
                 .thread_pool = thread_pool,
                 .completion_pool = CompletionPool.init(allocator),
                 .write_request_pool = WriteRequestPool.init(allocator),
-                .path = path orelse defaultSocketPath(uid),
+                .shutdown_async = try xev.Async.init(),
                 .allocator = allocator,
                 .write_buffer_pool = BufferPool.init(allocator),
-                .shutdown_async = try xev.Async.init(),
+                .message_queue = Queue(Message).init(MAX_QUEUE_SIZE),
+                .message_pool = MessagePool.init(allocator),
                 .state = .disconnected,
                 .interfaces = StringHashMap(Interface(Bus)).init(allocator),
                 .method_handles = StringHashMap(*const fn (bus: *Bus, msg: *Message) void).init(allocator),
@@ -135,6 +142,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
             bus.write_request_pool.deinit();
             bus.write_buffer_pool.deinit();
             bus.completion_pool.deinit();
+            bus.message_pool.deinit();
             if (bus.thread_pool) |pool| {
                 pool.shutdown();
                 pool.deinit();
@@ -469,17 +477,10 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 return .disarm;
             };
 
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            const reader = fbs.reader();
-            var read_hello_response: bool = false;
-            while (true) {
-                var msg = Message.decode(bus.allocator, reader) catch |e| switch (e) {
-                    error.EndOfStream => break,
-                    else => {
-                        log.err("dbus hello read err: {any}", .{e});
-                        return .disarm;
-                    },
-                };
+            bus.readBufferMessages(b.slice[0..n]);
+            var read_hello_response = false;
+            while (bus.message_queue.pop()) |msg| {
+                defer bus.message_pool.destroy(msg);
                 defer msg.deinit(bus.allocator);
 
                 if (msg.header.msg_type == .signal) continue;
@@ -546,12 +547,12 @@ pub fn Dbus(comptime bus_type: BusType) type {
 
         fn requestName(bus: *Bus, name: []const u8) !void {
             log.info("requesting name: {s}", .{name});
-            var msg = message.RequestName;
-            defer msg.deinit(bus.allocator);
-            try msg.appendString(bus.allocator, .string, name);
-            try msg.appendNumber(bus.allocator, @as(u32, 1));
+            var request_name_msg = message.RequestName;
+            defer request_name_msg.deinit(bus.allocator);
+            try request_name_msg.appendString(bus.allocator, .string, name);
+            try request_name_msg.appendNumber(bus.allocator, @as(u32, 1));
 
-            try bus.writeMsg(&msg);
+            try bus.writeMsg(&request_name_msg);
             bus.read(null, struct {
                 fn cb(
                     bus_: ?*Bus,
@@ -566,19 +567,13 @@ pub fn Dbus(comptime bus_type: BusType) type {
                         return .disarm;
                     };
 
-                    var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-                    while (true) {
-                        var msg_ = Message.decode(bus_.?.allocator, fbs.reader()) catch |e| switch (e) {
-                            error.EndOfStream => break,
-                            else => {
-                                log.err("dbus request name read err: {any}", .{e});
-                                return .disarm;
-                            },
-                        };
-                        defer msg_.deinit(bus_.?.allocator);
+                    bus_.?.readBufferMessages(b.slice[0..n]);
+                    while (bus_.?.message_queue.pop()) |msg| {
+                        defer bus_.?.message_pool.destroy(msg);
+                        defer msg.deinit(bus_.?.allocator);
 
-                        if (msg_.header.msg_type == .signal) continue;
-                        switch (msg_.values.?.get(0).?.inner.uint32) {
+                        if (msg.header.msg_type == .signal) continue;
+                        switch (msg.values.?.get(0).?.inner.uint32) {
                             1 => {
                                 log.debug("dbus request name read: name acquired\n", .{});
                                 return .disarm;
@@ -597,10 +592,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
                             },
                             // There are only 4 possible values
                             // but zig requires handling all cases
-                            else => {
-                                log.err("dbus request name read: unexpected reply value: {d}", .{msg_.values.?.get(0).?.inner.uint32});
-                                return .disarm;
-                            }
+                            else => {}
                         }
                     }
                     return .rearm;
@@ -609,24 +601,6 @@ pub fn Dbus(comptime bus_type: BusType) type {
             try bus.run(.once); // write
             try bus.run(.once); // read
             assert(bus.state == .ready);
-        }
-
-        pub fn writeMsg(bus: *Bus, msg: *Message) !void {
-            // If the serial isn't set to it's default value
-            // don't overwrite it with our message counter
-            if (msg.header.serial == 1) {
-                msg.header.serial = bus.msg_serial;
-                bus.msg_serial += 1;
-            }
-
-            const buf = try bus.write_buffer_pool.create();
-            var fbs = std.io.fixedBufferStream(buf);
-            const writer = fbs.writer();
-
-            try msg.encode(bus.allocator, writer);
-
-            const bytes = fbs.getWritten();
-            bus.write(bytes, null);
         }
 
         pub fn read(
@@ -643,16 +617,11 @@ pub fn Dbus(comptime bus_type: BusType) type {
         ) void {
             assert(bus.socket != null);
 
-            if (@intFromEnum(bus.state)
-                < comptime @intFromEnum(State.connected)
-            ) {
+            if (@intFromEnum(bus.state) < @intFromEnum(State.connected)) {
                 log.err("dbus read: bus is disconnected", .{});
                 return;
             }
-
-            assert(@intFromEnum(bus.state)
-                > comptime @intFromEnum(State.connected)
-            );
+            assert(@intFromEnum(bus.state) > @intFromEnum(State.connected));
 
             const c_ = c orelse &bus.read_completion;
             bus.socket.?.read(
@@ -687,47 +656,97 @@ pub fn Dbus(comptime bus_type: BusType) type {
             };
 
             if (n < Message.MinimumSize) {
-                log.err("dbus read: to few bytes {d}/{d} of minimum message size", .{n, Message.MinimumSize});
+                log.err(
+                    "dbus read: to few bytes {d}/{d} of minimum message size",
+                    .{n, Message.MinimumSize}
+                );
                 return .disarm;
             }
 
-            var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-            while (true) {
-                var msg = Message.decode(bus.allocator, fbs.reader()) catch |e| switch (e) {
-                    error.EndOfStream => break,
-                    error.IncompleteMsg => {
-                        log.err("dbus read: incomplete message", .{});
-                        return .disarm;
-                    },
-                    error.InvalidFields => {
-                        log.err("dbus read: invalid fields: {s}\n", .{b.slice[0..n]});
-                        return .disarm;
-                    },
-                    else => {
-                        log.err("dbus read err: {any}", .{e});
-                        return .disarm;
-                    },
-                };
+            bus.readBufferMessages(b.slice[0..n]);
+            while (bus.message_queue.pop()) |msg| {
+                defer bus.message_pool.destroy(msg);
                 defer msg.deinit(bus.allocator);
 
+                // fire our read_callback if we have one,
+                // we do this before checking message fields
+                // so it fires for all messages
+                if (bus.read_callback) |cb| cb(bus, msg);
+
+                // TODO: we ignore signals for now
                 if (msg.header.msg_type == .signal) continue;
 
-                if (bus.read_callback) |cb| cb(bus, &msg);
-
+                // these fields are required in order to determine
+                // which functions to fire and where so we continue
+                // if they're not found
                 const iface = msg.interface orelse continue;
                 const member = msg.member orelse continue;
                 const method_parts = [_][]const u8{iface, ".", member};
-                const method = std.mem.join(bus.allocator, "", &method_parts) catch |e| {
+
+                // our methods are a map on the key of the full
+                // intercace and member string, this way we can
+                // store different interfaces in the same map
+                const method = std.mem.join(
+                    bus.allocator,
+                    "",
+                    &method_parts
+                ) catch |e| {
                     log.err("dbus read: failed to join iface and member: {any}", .{e});
                     continue;
                 };
                 defer bus.allocator.free(method);
 
-                if (bus.method_handles.get(method) orelse null) |cb| cb(bus, &msg);
-                if (bus.interfaces.get(iface)) |i| i.call(bus, &msg);
+                if (bus.method_handles.get(method) orelse null) |cb| cb(bus, msg);
+                if (bus.interfaces.get(iface)) |i| i.call(bus, msg);
             }
 
             return .rearm;
+        }
+
+        fn readBufferMessages(bus: *Bus, buf: []const u8) void {
+            var fbs = std.io.fixedBufferStream(buf);
+            while (true) {
+                const msg = bus.message_pool.create() catch |e| {
+                    log.err("dbus read message pool: {any}", .{e});
+                    return;
+                };
+                msg.* = Message.decode(bus.allocator, fbs.reader()) catch |e| switch (e) {
+                    error.EndOfStream => break,
+                    error.IncompleteMsg => {
+                        log.err("dbus read: incomplete message", .{});
+                        return;
+                    },
+                    error.InvalidFields => {
+                        log.err("dbus read: invalid fields: {s}\n", .{buf});
+                        return;
+                    },
+                    else => {
+                        log.err("dbus read err: {any}", .{e});
+                        return;
+                    },
+                };
+                bus.message_queue.push(msg) catch |e| {
+                    log.err("dbus read message queue: {any}", .{e});
+                };
+            }
+        }
+
+        pub fn writeMsg(bus: *Bus, msg: *Message) !void {
+            // If the serial isn't set to it's default value
+            // don't overwrite it with our message counter
+            if (msg.header.serial == 1) {
+                msg.header.serial = bus.msg_serial;
+                bus.msg_serial += 1;
+            }
+
+            const buf = try bus.write_buffer_pool.create();
+            var fbs = std.io.fixedBufferStream(buf);
+            const writer = fbs.writer();
+
+            try msg.encode(bus.allocator, writer);
+
+            const bytes = fbs.getWritten();
+            bus.write(bytes, null);
         }
 
         fn write(
@@ -774,14 +793,13 @@ pub fn Dbus(comptime bus_type: BusType) type {
             r: xev.WriteError!usize,
         ) xev.CallbackAction {
             const bus = bus_.?;
-
-            assert(bus.state == .ready);
-            assert(bus.socket != null);
-
             _ = r catch |e| {
                 log.err("dbus write err: {any}", .{e});
                 return .disarm;
             };
+
+            assert(bus.state == .ready);
+            assert(bus.socket != null);
 
             if (bus.write_callback) |cb| cb(bus);
 
@@ -802,7 +820,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
         pub fn shutdownAsyncCallback(
             bus_: ?*Bus,
             _: *xev.Loop,
-            c: *xev.Completion,
+            _: *xev.Completion,
             _: xev.Async.WaitError!void,
         ) xev.CallbackAction {
             const bus = bus_.?;
@@ -811,6 +829,10 @@ pub fn Dbus(comptime bus_type: BusType) type {
             assert(bus.socket != null);
             assert(@intFromEnum(bus.state) > @intFromEnum(State.connected));
 
+            const c = bus.completion_pool.create() catch |e| {
+                log.err("dbus shutdown async completion pool create err: {any}", .{e});
+                return .disarm;
+            };
             bus.socket.?.shutdown(
                 &bus.loop,
                 c,

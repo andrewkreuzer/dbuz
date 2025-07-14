@@ -110,6 +110,8 @@ pub const Message = struct {
     // Yes??
     arena: ?ArenaAllocator = null,
 
+    next: ?*Self = null,
+
     const Self = @This();
     pub const MinimumSize = @sizeOf(Header) + @sizeOf(u32) * 2;
 
