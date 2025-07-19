@@ -277,7 +277,10 @@ test "bind" {
 
     var thread_pool = xev.ThreadPool.init(.{});
     // var server = try Dbus(.server).init(alloc, &thread_pool, "/tmp/dbus-test");
-    var server = try Dbus(.server).init(alloc, &thread_pool, null);
+    var server = try Dbus(.server).init(.{
+        .allocator = alloc,
+        .thread_pool = &thread_pool,
+    });
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
@@ -344,7 +347,10 @@ test "call" {
 
     var server_thread_pool = xev.ThreadPool.init(.{});
     // var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbus-test");
-    var server = try Dbus(.server).init(alloc, &server_thread_pool, null);
+    var server = try Dbus(.server).init(.{
+        .allocator = alloc,
+        .thread_pool = &server_thread_pool,
+    });
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
@@ -354,7 +360,10 @@ test "call" {
 
     var client_thread_pool = xev.ThreadPool.init(.{});
     // var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbus-test");
-    var client = try Dbus(.client).init(alloc, &client_thread_pool, null);
+    var client = try Dbus(.client).init(.{
+        .allocator = alloc,
+        .thread_pool = &client_thread_pool
+    });
     defer client.deinit();
 
     try client.start(.{});
@@ -423,7 +432,10 @@ test "return types" {
 
     var server_thread_pool = xev.ThreadPool.init(.{});
     // var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbus-test");
-    var server = try Dbus(.server).init(alloc, &server_thread_pool, null);
+    var server = try Dbus(.server).init(.{
+        .allocator = alloc,
+        .thread_pool = &server_thread_pool,
+    });
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
@@ -433,7 +445,10 @@ test "return types" {
 
     var client_thread_pool = xev.ThreadPool.init(.{});
     // var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbus-test");
-    var client = try Dbus(.client).init(alloc, &client_thread_pool, null);
+    var client = try Dbus(.client).init(.{
+        .allocator = alloc,
+        .thread_pool = &client_thread_pool
+    });
     const ClientBus = @TypeOf(client);
     defer client.deinit();
 

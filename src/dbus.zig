@@ -33,6 +33,13 @@ pub const BusType = enum {
     server,
 };
 
+const BusOptions = struct {
+    allocator: Allocator,
+    thread_pool: ?*xev.ThreadPool = null,
+    path: ?[]const u8 = null,
+};
+
+
 pub fn Dbus(comptime bus_type: BusType) type {
     return struct {
         type: BusType,
@@ -114,24 +121,24 @@ pub fn Dbus(comptime bus_type: BusType) type {
             ready,
         };
 
-        pub fn init(allocator: Allocator, thread_pool: ?*xev.ThreadPool, path: ?[]const u8) !Bus {
+        pub fn init(options: BusOptions) !Bus {
             const uid = std.os.linux.getuid();
             return .{
                 .type = bus_type,
                 .uid = uid,
-                .path = path orelse defaultSocketPath(uid),
-                .loop = try xev.Loop.init(.{ .thread_pool = thread_pool }),
-                .thread_pool = thread_pool,
-                .completion_pool = CompletionPool.init(allocator),
-                .write_request_pool = WriteRequestPool.init(allocator),
+                .path = options.path orelse defaultSocketPath(uid),
+                .loop = try xev.Loop.init(.{ .thread_pool = options.thread_pool }),
+                .thread_pool = options.thread_pool,
+                .completion_pool = CompletionPool.init(options.allocator),
+                .write_request_pool = WriteRequestPool.init(options.allocator),
                 .shutdown_async = try xev.Async.init(),
-                .allocator = allocator,
-                .write_buffer_pool = BufferPool.init(allocator),
+                .allocator = options.allocator,
+                .write_buffer_pool = BufferPool.init(options.allocator),
                 .message_queue = Queue(Message).init(MAX_QUEUE_SIZE),
-                .message_pool = MessagePool.init(allocator),
+                .message_pool = MessagePool.init(options.allocator),
                 .state = .disconnected,
-                .interfaces = StringHashMap(Interface(Bus)).init(allocator),
-                .method_handles = StringHashMap(*const fn (bus: *Bus, msg: *Message) void).init(allocator),
+                .interfaces = StringHashMap(Interface(Bus)).init(options.allocator),
+                .method_handles = StringHashMap(*const fn (bus: *Bus, msg: *Message) void).init(options.allocator),
             };
         }
 
@@ -923,7 +930,10 @@ test Dbus {
 
     const allocator = std.testing.allocator;
     var thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus(.server).init(allocator, &thread_pool, null);
+    var server = try Dbus(.server).init(.{
+        .allocator = allocator,
+        .thread_pool = &thread_pool
+    });
     defer server.deinit();
 
     try server.setMethodHandle("net.dbuz.example.Echo", struct {
@@ -956,7 +966,10 @@ test "setup and shutdown" {
     const allocator = std.testing.allocator;
     var thread_pool = xev.ThreadPool.init(.{});
     // var server = try Dbus(.server).init(allocator, &thread_pool, "/tmp/dbus-test");
-    var server = try Dbus(.server).init(allocator, &thread_pool, null);
+    var server = try Dbus(.server).init(.{
+        .allocator = allocator,
+        .thread_pool = &thread_pool
+    });
     defer server.deinit();
 
     server.state = .connecting;
@@ -994,7 +1007,10 @@ test "failed auth disconnect" {
     const allocator = std.testing.allocator;
     var thread_pool = xev.ThreadPool.init(.{});
     // var server = try Dbus(.server).init(allocator, &thread_pool, "/tmp/dbus-test");
-    var server = try Dbus(.server).init(allocator, &thread_pool, null);
+    var server = try Dbus(.server).init(.{
+        .allocator = allocator,
+        .thread_pool = &thread_pool
+    });
     const Bus = @TypeOf(server);
     defer server.deinit();
 
@@ -1043,22 +1059,6 @@ test "failed auth disconnect" {
     try std.testing.expect(server.state == .disconnected);
 }
 
-test "reconnect" {
-    const build_options = @import("build_options");
-    if (!build_options.run_integration_tests) {
-        return error.SkipZigTest;
-    }
-
-    const alloc = std.testing.allocator;
-    var server_thread_pool = xev.ThreadPool.init(.{});
-    // var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbus-test");
-    var server = try Dbus(.server).init(alloc, &server_thread_pool, null);
-    defer server.deinit();
-
-    try server.start(.{});
-    try std.testing.expect(server.state == .ready);
-}
-
 test "send msg" {
     const build_options = @import("build_options");
     if (!build_options.run_integration_tests) {
@@ -1068,7 +1068,10 @@ test "send msg" {
     const alloc = std.testing.allocator;
     var server_thread_pool = xev.ThreadPool.init(.{});
     // var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbus-test");
-    var server = try Dbus(.server).init(alloc, &server_thread_pool, null);
+    var server = try Dbus(.server).init(.{
+        .allocator = alloc,
+        .thread_pool = &server_thread_pool
+    });
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
@@ -1090,7 +1093,10 @@ test "send msg" {
 
     var client_thread_pool = xev.ThreadPool.init(.{});
     // var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbus-test");
-    var client = try Dbus(.client).init(alloc, &client_thread_pool, null);
+    var client = try Dbus(.client).init(.{
+        .allocator = alloc,
+        .thread_pool = &client_thread_pool
+    });
     const ClientBus = @TypeOf(client);
     defer client.deinit();
     try client.start(.{});

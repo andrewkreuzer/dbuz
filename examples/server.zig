@@ -22,7 +22,10 @@ pub fn main() !void {
     defer loop.deinit();
 
     var thread_pool = xev.ThreadPool.init(.{});
-    var server = try Dbus(.server).init(allocator, &thread_pool, null);
+    var server = try Dbus(.server).init(.{
+        .allocator = allocator,
+        .thread_pool = &thread_pool
+    });
     defer server.deinit();
 
     var guide: Guide = .{};

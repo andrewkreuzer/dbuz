@@ -72,7 +72,10 @@ const Server = struct {
 
     fn init(allocator: Allocator, thread_pool: *xev.ThreadPool) !Server {
         return .{
-            .dbus = try Dbus(.server).init(allocator, thread_pool, null),
+            .dbus = try Dbus(.server).init(.{
+                .allocator = allocator,
+                .thread_pool = thread_pool,
+            }),
             .main_async = try xev.Async.init(),
         };
     }
@@ -97,7 +100,10 @@ const Client = struct {
         const allocator = gpa.allocator();
 
         var thread_pool = xev.ThreadPool.init(.{});
-        var dbus = try Dbus(.client).init(allocator, &thread_pool, null);
+        var dbus = try Dbus(.client).init(.{
+            .allocator = allocator,
+            .thread_pool = &thread_pool
+        });
         defer dbus.deinit();
 
         std.debug.print("starting dbus client\n", .{});

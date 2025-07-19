@@ -16,7 +16,10 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var thread_pool = xev.ThreadPool.init(.{});
-    var dbus = try Dbus(.client).init(allocator, &thread_pool, null);
+    var dbus = try Dbus(.client).init(.{
+        .allocator = allocator,
+        .thread_pool = &thread_pool
+    });
     defer dbus.deinit();
 
     dbus.read_callback = readCallback;
