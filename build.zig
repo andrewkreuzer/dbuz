@@ -49,11 +49,26 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&bench_cmd.step);
 
+    const example_step = b.step("run-example", "Run an example");
     const example_name = b.option([]const u8, "example", "Example to run");
     if (example_name) |name| {
-        const example_step = b.step("example", "Run an example");
-        const run_example = createExampleRun(b, target, optimize, name, xev.module("xev"), lib_mod);
+        const run_example = createExampleRun(b, target, optimize, name, xev.module("xev"), lib_mod)
+            catch |err| switch (err) {
+                error.FileNotFound => {
+                    example_step.addError("Example not found in examples/{s}.zig", .{ name }) catch unreachable;
+                    return;
+                },
+                else => {
+                    example_step.addError("failed to open examples/{s}.zig {any}", .{ name, err }) catch unreachable;
+                    return;
+                }
+            };
         example_step.dependOn(&run_example.step);
+    } else {
+        example_step.addError(
+            "No example specified. Use -Dexample=<name> to run an example.",
+            .{}
+        ) catch unreachable;
     }
 
     // much of the test suite relies on a D-Bus session bus being available
@@ -81,19 +96,9 @@ fn createExampleRun(
     example_name: []const u8,
     xev: *std.Build.Module,
     lib: *std.Build.Module
-) *std.Build.Step.Run {
+) !*std.Build.Step.Run {
     const example_path = std.fmt.allocPrint(b.allocator, "examples/{s}.zig", .{example_name}) catch unreachable;
-
-    const file = std.fs.cwd().openFile(example_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            std.log.err("Example '{s}' not found at {s}", .{ example_name, example_path });
-            std.process.exit(1);
-        },
-        else => {
-            std.log.err("Failed to open example file '{s}': {any}", .{ example_path, err });
-            std.process.exit(1);
-        }
-    };
+    const file = try std.fs.cwd().openFile(example_path, .{});
     file.close();
 
     const example_exe = b.addExecutable(.{

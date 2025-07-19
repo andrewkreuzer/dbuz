@@ -40,9 +40,10 @@ pub fn BusInterface(comptime BusType: type, comptime I: anytype) type {
         const Self = @This();
 
         i: *I,
-        comptime name: []const u8 = structInfo().name,
+        comptime name: []const u8 = struct_info.name,
         comptime methods: StaticStringMap(Method) = methodInfo(),
 
+        const struct_info = structInfo();
         const Fn = *const fn(*I, *BusType, *const Message, ?[]const u8) void;
         const Method = struct{
             name: []const u8,
@@ -76,14 +77,14 @@ pub fn BusInterface(comptime BusType: type, comptime I: anytype) type {
             msg: *const Message,
         ) void {
             const i: *const Self = @ptrCast(@alignCast(i_));
-            const m = i.method(msg.member.?) orelse return;
+            const m = i.method(msg.member.?) orelse return methodNotFound(bus, msg);
             return m.@"fn"(i.i, bus, msg, m.return_sig);
         }
 
         fn structInfo() struct { name: []const u8 } {
             comptime {
-                const struct_info = @typeInfo(I).@"struct";
-                for (struct_info.fields) |field| {
+                const struct_type_info = @typeInfo(I).@"struct";
+                for (struct_type_info.fields) |field| {
                     if (mem.eql(u8, field.name, "name")) {
                         const name = field.defaultValue() orelse {
                             @compileError(@typeName(I) ++ " must have it's `name` field set as a default value");
@@ -231,6 +232,20 @@ pub fn BusInterface(comptime BusType: type, comptime I: anytype) type {
                 }
 
             }.f;
+        }
+
+        fn methodNotFound(bus: *BusType, msg: *const Message) void {
+            const error_name = struct_info.name ++ ".Error.MethodNotFound";
+            var error_msg = Message.init(.{
+                .msg_type = .@"error",
+                .destination = msg.sender,
+                .sender = msg.destination,
+                .reply_serial = msg.header.serial,
+                .error_name = error_name,
+                .flags = 0x01,
+            });
+            defer error_msg.deinit(bus.allocator);
+            bus.writeMsg(&error_msg) catch log.err("failed to write error message", .{});
         }
     };
 }
@@ -651,4 +666,78 @@ test "return types" {
     try client.run(.until_done);
     try std.testing.expect(client.state == .disconnected);
 
+}
+
+test "method not found" {
+    const build_options = @import("build_options");
+    if (!build_options.run_integration_tests) {
+        return error.SkipZigTest;
+    }
+
+    const alloc = std.testing.allocator;
+    const xev = @import("xev");
+
+    const Test = struct {
+        name: []const u8 = "net.dbuz.test.NoMethod",
+    };
+    var t: Test = .{};
+
+    var server_thread_pool = xev.ThreadPool.init(.{});
+    // var server = try Dbus(.server).init(alloc, &server_thread_pool, "/tmp/dbus-test");
+    var server = try Dbus(.server).init(.{
+        .allocator = alloc,
+        .thread_pool = &server_thread_pool,
+    });
+    const ServerBus = @TypeOf(server);
+    defer server.deinit();
+
+    try server.bind(BusInterface(ServerBus, Test).init(&t).interface());
+    try server.start(.{});
+    try std.testing.expect(server.state == .ready);
+
+    var client_thread_pool = xev.ThreadPool.init(.{});
+    // var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbus-test");
+    var client = try Dbus(.client).init(.{
+        .allocator = alloc,
+        .thread_pool = &client_thread_pool
+    });
+    defer client.deinit();
+
+    try client.start(.{ .start_read = true });
+    try std.testing.expect(client.state == .ready);
+
+    var msg = Message.init(.{
+        .msg_type = .method_call,
+        .path = "/net/dbuz/test/NoMethod",
+        .interface = "net.dbuz.test.NoMethod",
+        .destination = "net.dbuz.test.NoMethod",
+        .member = "NotFound",
+        .flags = 0x04,
+        .serial = 123,
+    });
+    try client.writeMsg(&msg);
+    msg.deinit(client.allocator);
+    try client.run(.once);
+
+    // read and write
+    try server.run(.once);
+    try server.run(.once);
+
+    client.read_callback = struct {
+        fn cb(_: *@TypeOf(client), m: *Message) void {
+            std.testing.expectEqualStrings(
+                "net.dbuz.test.NoMethod.Error.MethodNotFound",
+                m.error_name.?
+            ) catch unreachable;
+        }
+    }.cb;
+    try client.run(.once);
+
+    try server.shutdown();
+    try server.run(.until_done);
+    try std.testing.expect(server.state == .disconnected);
+
+    try client.shutdown();
+    try client.run(.until_done);
+    try std.testing.expect(client.state == .disconnected);
 }

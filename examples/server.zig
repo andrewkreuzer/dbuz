@@ -36,8 +36,11 @@ pub fn main() !void {
     const planet_iface = BusInterface(@TypeOf(server), Planet).init(&planet);
     try server.bind(planet_iface.interface());
 
-    try server.start(.{});
+    var empty: Empty = .{};
+    const empty_iface = BusInterface(@TypeOf(server), Empty).init(&empty);
+    try server.bind(empty_iface.interface());
 
+    try server.start(.{});
     try server.run(.until_done);
 }
 
@@ -53,4 +56,8 @@ const Planet = struct {
     pub fn hack( _: *@This()) !bool {
         return true;
     }
+};
+
+const Empty = struct {
+    name: []const u8 = "com.example.Empty",
 };

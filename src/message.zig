@@ -295,12 +295,12 @@ pub const Message = struct {
     pub fn appendError(
         self: *Self,
         alloc: Allocator,
-        comptime bus_name: []const u8,
+        comptime interface: []const u8,
         err: anytype,
         error_msg: ?[]const u8,
     ) !void {
         assert(@typeInfo(@TypeOf(err)) == .error_set);
-        const bus_error_prefix = bus_name ++ ".Error.";
+        const bus_error_prefix = interface ++ ".Error.";
         const err_name = @errorName(err);
 
         var buf = try alloc.alloc(u8, bus_error_prefix.len + err_name.len);

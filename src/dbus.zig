@@ -623,6 +623,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
             }.cb);
             try bus.run(.once); // write
             try bus.run(.once); // read
+            try bus.run(.no_wait); // rearm
             assert(bus.state == .ready);
         }
 
@@ -716,7 +717,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 };
                 defer bus.allocator.free(method);
 
-                if (bus.method_handles.get(method) orelse null) |cb| cb(bus, msg);
+                if (bus.method_handles.get(method)) |cb| cb(bus, msg);
                 if (bus.interfaces.get(iface)) |i| i.call(bus, msg);
             }
 
@@ -737,6 +738,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
                         return;
                     },
                 };
+
                 log.debug(
                     "dbus read msg: type: {s} serial: {d} reply_serial: {any} interface: {s} path: {s} member: {s}",
                     .{
@@ -1104,6 +1106,7 @@ test "send msg" {
 
     client.read_callback = struct {
         fn cb(_: *ClientBus, m: *Message) void {
+            if (m.header.msg_type == .signal) return;
             std.testing.expectEqual(.method_return, m.header.msg_type) catch unreachable;
             std.testing.expectEqualStrings("/net/dbuz/test/SendMsg", m.path.?) catch unreachable;
             std.testing.expectEqualStrings("net.dbuz.test.SendMsg", m.interface.?) catch unreachable;
@@ -1133,6 +1136,52 @@ test "send msg" {
     try server.shutdown();
     server.run(.until_done) catch unreachable;
     try std.testing.expect(server.state == .disconnected);
+
+    try client.shutdown();
+    client.run(.until_done) catch unreachable;
+    try std.testing.expect(client.state == .disconnected);
+}
+
+test "method_handle not found" {
+    const build_options = @import("build_options");
+    if (!build_options.run_integration_tests) {
+        return error.SkipZigTest;
+    }
+
+    const alloc = std.testing.allocator;
+    var client_thread_pool = xev.ThreadPool.init(.{});
+    // var client = try Dbus(.client).init(alloc, &client_thread_pool, "/tmp/dbus-test");
+    var client = try Dbus(.client).init(.{
+        .allocator = alloc,
+        .thread_pool = &client_thread_pool
+    });
+    const ClientBus = @TypeOf(client);
+    defer client.deinit();
+    try client.start(.{ .start_read = true });
+
+    client.read_callback = struct {
+        fn cb(_: *ClientBus, m: *Message) void {
+            if (m.header.msg_type == .signal) return;
+            std.testing.expectEqual(.@"error", m.header.msg_type) catch unreachable;
+            std.testing.expectEqualStrings("org.freedesktop.DBus.Error.ServiceUnknown", m.error_name.?) catch unreachable;
+            std.testing.expectEqual(2, m.reply_serial.?) catch unreachable;
+        }
+    }.cb;
+
+    var msg = Message.init(.{
+        .msg_type = .method_call,
+        .path = "/net/dbuz/test/MethodNotFound",
+        .interface = "net.dbuz.test.MethodNotFound",
+        .destination = "net.dbuz.test.MethodNotFound",
+        .member = "NotFound",
+        .flags = 0x00,
+    });
+    try client.writeMsg(&msg);
+    try client.run(.once);
+    msg.deinit(client.allocator);
+
+    // read
+    try client.run(.once);
 
     try client.shutdown();
     client.run(.until_done) catch unreachable;

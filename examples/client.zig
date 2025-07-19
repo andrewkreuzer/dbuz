@@ -10,6 +10,10 @@ const BusInterface = lib.BusInterface;
 const Dbus = lib.Dbus;
 const Message = lib.Message;
 
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+};
+
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -44,13 +48,29 @@ pub fn main() !void {
         .flags = 0x04,
     });
 
+    var empty = Message.init(.{
+        .msg_type = .method_call,
+        .path = "/com/example/Empty",
+        .interface = "com.example.Empty",
+        .destination = "com.example.Empty",
+        .member = "NotFound",
+        .flags = 0x04,
+    });
+
     try dbus.writeMsg(&life);
     defer life.deinit(allocator);
+    try dbus.run(.once);
+
     try dbus.writeMsg(&hack);
     defer hack.deinit(allocator);
+    try dbus.run(.once);
 
+    try dbus.writeMsg(&empty);
+    defer empty.deinit(allocator);
     try dbus.run(.once);
-    try dbus.run(.once);
+
+    std.Thread.sleep(100 * std.time.ns_per_ms); // Give some time for the messages to be processed
+    // read
     try dbus.run(.once);
 
     try dbus.shutdown();
@@ -70,10 +90,18 @@ pub fn main() !void {
 // };
 
 fn readCallback(_: *Dbus(.client), msg: *Message) void {
-    const ret = msg.values.?.get(0).?.inner;
-    switch (ret) {
-        .uint32 => |value| std.debug.print("Received uint32: {d}\n", .{value}),
-        .boolean => |value| std.debug.print("Received boolean: {any}\n", .{value}),
-        else => {},
+    switch (msg.header.msg_type) {
+        .@"error" => std.debug.print("Received error message: {s}\n", .{msg.error_name.?}),
+        .method_return => |_| {
+            const ret = msg.values.?.get(0).?.inner;
+            switch (ret) {
+                .uint32 => |value| std.debug.print("Received uint32: {d}\n", .{value}),
+                .boolean => |value| std.debug.print("Received boolean: {any}\n", .{value}),
+                else => {},
+            }
+        },
+        else => |msg_type| {
+            std.debug.print("Received unexpected message type: {s}\n", .{@tagName(msg_type)});
+        },
     }
 }
