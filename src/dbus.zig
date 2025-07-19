@@ -151,8 +151,8 @@ pub fn Dbus(comptime bus_type: BusType) type {
             }
         }
 
-        pub fn bind(bus: *Bus, comptime name: []const u8, iface: Interface(Bus)) !void {
-            try bus.interfaces.put(name, iface);
+        pub fn bind(bus: *Bus, iface: Interface(Bus)) !void {
+            try bus.interfaces.put(iface.name, iface);
         }
 
         pub fn defaultSocketPath(uid: u32) []const u8 {
@@ -179,15 +179,18 @@ pub fn Dbus(comptime bus_type: BusType) type {
             try bus.loop.run(mode);
         }
 
-        pub fn disconnected(bus: *Bus) bool {
-            return bus.state == .disconnected;
+        fn run_until(bus: *Bus, state: State) !void {
+            while (bus.state != state) {
+                if (bus.state == .disconnected) return error.ConnectionInterupt;
+                try bus.loop.run(.once);
+            }
         }
 
         /// Options for starting the bus connection
         ///
-        /// `opts.start_read` is enabled by default for servers but is provided as an option
-        /// for clients to allow them to start reading messages immediately after the bus is ready.
-        /// or to disable immediate reading for servers
+        /// - `opts.start_read` is enabled by default for servers but is provided as an option
+        /// for clients to allow them to start reading messages immediately after the
+        /// bus is ready. or to disable immediate reading for servers
         pub const StartOptions = struct {
             start_read: bool = if (bus_type == .server) true else false,
         };
@@ -215,11 +218,14 @@ pub fn Dbus(comptime bus_type: BusType) type {
                     continue :bus_state .connecting;
                 },
                 .connecting => {
-                    try bus.connect();
-                    if (bus.state != .connected) {
-                        log.err("dbus start: failed to connect to socket: {s}", .{bus.path});
-                        continue :bus_state bus.attemptReconnect();
-                    }
+                    bus.connect() catch |e| switch (e) {
+                        error.ConnectionInterupt => {
+                            log.err("dbus start: failed to connect to socket: {s}", .{bus.path});
+                            continue :bus_state try bus.attemptReconnect();
+                        },
+                        else => return e
+                    };
+
                     continue :bus_state .connected;
                 },
                 .connected => {
@@ -230,11 +236,14 @@ pub fn Dbus(comptime bus_type: BusType) type {
                     continue :bus_state .authenticating;
                 },
                 .authenticating => {
-                    try bus.authenticate();
-                    if (bus.state == .disconnected) {
-                        log.err("dbus start: failed to authenticate to socket: {s}", .{bus.path});
-                        continue :bus_state bus.attemptReconnect();
-                    }
+                    bus.authenticate() catch |e| switch (e) {
+                        error.ConnectionInterupt => {
+                            log.err("dbus start: failed to authenticate to socket: {s}", .{bus.path});
+                            continue :bus_state try bus.attemptReconnect();
+                        },
+                        else => return e
+                    };
+
                     continue :bus_state .authenticated;
                 },
                 .authenticated => {
@@ -246,11 +255,13 @@ pub fn Dbus(comptime bus_type: BusType) type {
                     continue :bus_state .hello;
                 },
                 .hello => {
-                    try bus.sendHello();
-                    if (bus.state != .ready) {
-                        log.err("dbus start: failed to send hello message: {s}", .{bus.path});
-                        continue :bus_state bus.attemptReconnect();
-                    }
+                    bus.sendHello() catch |e| switch (e) {
+                        error.ConnectionInterupt => {
+                            log.err("dbus start: failed to send hello message: {s}", .{bus.path});
+                            continue :bus_state try bus.attemptReconnect();
+                        },
+                        else => return e
+                    };
                     continue :bus_state .ready;
                 },
                 .ready => {
@@ -286,26 +297,29 @@ pub fn Dbus(comptime bus_type: BusType) type {
             bus.connection_attempts += 1;
             var c: xev.Completion = undefined;
             bus.socket.?.connect(&bus.loop, &c, addr, Bus, bus, onConnect);
-            try bus.run(.once);
+            try bus.run_until(.connected);
         }
 
         fn attemptReconnect(
             bus: *Bus,
-        ) State {
-            if (bus.connection_attempts < bus.max_connection_attempts) {
-                bus.connection_attempts += 1;
-                log.info(
-                    "dbus connect: retrying connection to {s} ({d}/{d})",
-                    .{bus.path, bus.connection_attempts, bus.max_connection_attempts}
-                );
-                return .connecting;
-            } else {
+        ) !State {
+            if (bus.connection_attempts >= bus.max_connection_attempts) {
                 log.err(
                     "dbus connect: max connection attempts reached ({d}/{d})",
                     .{bus.connection_attempts, bus.max_connection_attempts}
                 );
+                try bus.shutdown();
+                try bus.run(.until_done);
+                bus.deinit();
                 std.posix.exit(1);
             }
+
+            log.info(
+                "dbus connect: retrying connection to {s} ({d}/{d})",
+                .{bus.path, bus.connection_attempts, bus.max_connection_attempts}
+            );
+            bus.state = .connecting;
+            return .connecting;
         }
 
         fn onConnect(
@@ -349,7 +363,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
             );
 
             bus.write(msg, onAuthWrite);
-            while (bus.state != .authenticated) try bus.run(.once);
+            try bus.run_until(.authenticated);
         }
 
         fn onAuthWrite(
@@ -398,7 +412,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 return .disarm;
             }
 
-            log.debug("dbus auth succeeded: {s}", .{slice});
+            log.debug("dbus auth succeeded: {s}", .{slice[0..n-1]});
             bus.server_id = iter.next() orelse {
                 log.err("dbus auth read: no server address in response: {s}", .{slice});
                 return .disarm;
@@ -442,7 +456,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
             try msg.encode(bus.allocator, writer);
 
             bus.write(fbs.getWritten(), onHelloWrite);
-            while (bus.state != .ready) try bus.run(.once);
+            try bus.run_until(.ready);
         }
 
         fn onHelloWrite(
@@ -549,12 +563,12 @@ pub fn Dbus(comptime bus_type: BusType) type {
 
         fn requestName(bus: *Bus, name: []const u8) !void {
             log.info("requesting name: {s}", .{name});
-            var request_name_msg = message.RequestName;
-            defer request_name_msg.deinit(bus.allocator);
-            try request_name_msg.appendString(bus.allocator, .string, name);
-            try request_name_msg.appendNumber(bus.allocator, @as(u32, 1));
+            var req_msg = message.RequestName;
+            defer req_msg.deinit(bus.allocator);
+            try req_msg.appendString(bus.allocator, .string, name);
+            try req_msg.appendNumber(bus.allocator, @as(u32, 1));
 
-            try bus.writeMsg(&request_name_msg);
+            try bus.writeMsg(&req_msg);
             bus.read(null, struct {
                 fn cb(
                     bus_: ?*Bus,
@@ -577,19 +591,19 @@ pub fn Dbus(comptime bus_type: BusType) type {
                         if (msg.header.msg_type == .signal) continue;
                         switch (msg.values.?.get(0).?.inner.uint32) {
                             1 => {
-                                log.debug("dbus request name read: name acquired\n", .{});
+                                log.debug("dbus request name read: name acquired", .{});
                                 return .disarm;
                             },
                             2, => {
-                                log.debug("dbus request name read: name already exists, added to queue\n", .{});
+                                log.debug("dbus request name read: name already exists, added to queue", .{});
                                 return .disarm;
                             },
                             3, => {
-                                log.debug("dbus request name read: name already exists, cannot aquire\n", .{});
+                                log.debug("dbus request name read: name already exists, cannot aquire", .{});
                                 return .disarm;
                             },
                             4, => {
-                                log.debug("dbus request name read: dbus is already owner of name\n", .{});
+                                log.debug("dbus request name read: dbus is already owner of name", .{});
                                 return .disarm;
                             },
                             // There are only 4 possible values
@@ -705,25 +719,28 @@ pub fn Dbus(comptime bus_type: BusType) type {
         fn readBufferMessages(bus: *Bus, buf: []const u8) void {
             var fbs = std.io.fixedBufferStream(buf);
             while (true) {
-                const msg = bus.message_pool.create() catch |e| {
+                const msg: *Message = bus.message_pool.create() catch |e| {
                     log.err("dbus read message pool: {any}", .{e});
                     return;
                 };
                 msg.* = Message.decode(bus.allocator, fbs.reader()) catch |e| switch (e) {
                     error.EndOfStream => break,
-                    error.IncompleteMsg => {
-                        log.err("dbus read: incomplete message", .{});
-                        return;
-                    },
-                    error.InvalidFields => {
-                        log.err("dbus read: invalid fields: {s}\n", .{buf});
-                        return;
-                    },
                     else => {
                         log.err("dbus read err: {any}", .{e});
                         return;
                     },
                 };
+                log.debug(
+                    "dbus read msg: type: {s} serial: {d} reply_serial: {any} interface: {s} path: {s} member: {s}",
+                    .{
+                        @tagName(msg.header.msg_type),
+                        msg.header.serial,
+                        msg.reply_serial,
+                        msg.interface orelse "null",
+                        msg.path orelse "null",
+                        msg.member orelse "null",
+                    }
+                );
                 bus.message_queue.push(msg) catch |e| {
                     log.err("dbus read message queue: {any}", .{e});
                 };
@@ -743,8 +760,20 @@ pub fn Dbus(comptime bus_type: BusType) type {
             const writer = fbs.writer();
 
             try msg.encode(bus.allocator, writer);
-
             const bytes = fbs.getWritten();
+
+            log.debug(
+                "dbus writing msg: type: {s} serial: {d} reply_serial: {any} interface: {s} path: {s} member: {s} len: {d}",
+                .{
+                    @tagName(msg.header.msg_type),
+                    msg.header.serial,
+                    msg.reply_serial,
+                    msg.interface orelse "null",
+                    msg.path orelse "null",
+                    msg.member orelse "null",
+                    bytes.len
+                }
+            );
             bus.write(bytes, null);
         }
 

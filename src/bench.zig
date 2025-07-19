@@ -60,6 +60,7 @@ fn mainAsyncCallback(
 const CompletionPool = MemoryPool(xev.Completion);
 
 const Bench = struct {
+    name: []const u8 = "com.dbuz.Bench",
     pub fn run( _: *@This()) !u32 {
         return 42;
     }
@@ -77,10 +78,9 @@ const Server = struct {
     }
 
     pub fn mainThread(self: *Server) !void {
-        const bus_name = "com.dbuz";
         var notifier: Bench = .{};
-        const notifier_iface = BusInterface(@TypeOf(self.dbus), Bench, bus_name).init(&notifier);
-        try self.dbus.bind(bus_name ++ ".Bench", notifier_iface.interface());
+        const notifier_iface = BusInterface(@TypeOf(self.dbus), Bench).init(&notifier);
+        try self.dbus.bind(notifier_iface.interface());
 
         std.debug.print("starting dbus server\n", .{});
         try self.dbus.start(.{});

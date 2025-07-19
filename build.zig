@@ -49,9 +49,16 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&bench_cmd.step);
 
+    const example_name = b.option([]const u8, "example", "Example to run");
+    if (example_name) |name| {
+        const example_step = b.step("example", "Run an example");
+        const run_example = createExampleRun(b, target, optimize, name, xev.module("xev"), lib_mod);
+        example_step.dependOn(&run_example.step);
+    }
+
     // much of the test suite relies on a D-Bus session bus being available
     const run_integration_tests = std.process.getEnvVarOwned(
-        b.allocator, 
+        b.allocator,
         "DBUS_SESSION_BUS_ADDRESS"
     ) != error.EnvironmentVariableNotFound;
     const options = b.addOptions();
@@ -65,4 +72,45 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+}
+
+fn createExampleRun(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    example_name: []const u8,
+    xev: *std.Build.Module,
+    lib: *std.Build.Module
+) *std.Build.Step.Run {
+    const example_path = std.fmt.allocPrint(b.allocator, "examples/{s}.zig", .{example_name}) catch unreachable;
+
+    const file = std.fs.cwd().openFile(example_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.log.err("Example '{s}' not found at {s}", .{ example_name, example_path });
+            std.process.exit(1);
+        },
+        else => {
+            std.log.err("Failed to open example file '{s}': {any}", .{ example_path, err });
+            std.process.exit(1);
+        }
+    };
+    file.close();
+
+    const example_exe = b.addExecutable(.{
+        .name = example_name,
+        .root_source_file = b.path(example_path),
+        .target = target,
+        .optimize = optimize,
+    });
+    example_exe.root_module.addImport("libdbuz", lib);
+    example_exe.root_module.addImport("xev", xev);
+
+    const run_cmd = b.addRunArtifact(example_exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    return run_cmd;
 }

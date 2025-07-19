@@ -19,6 +19,7 @@ const Values = @import("types.zig").Values;
 pub fn Interface(comptime BusType: type) type {
     return struct {
         ptr: *const anyopaque,
+        name: []const u8,
         vtable: *const VTable,
         const VTable = struct {
             call: *const fn(*const anyopaque, *BusType, *const Message) void,
@@ -34,14 +35,15 @@ pub fn Interface(comptime BusType: type) type {
     };
 }
 
-pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []const u8) type {
+pub fn BusInterface(comptime BusType: type, comptime I: anytype) type {
     return struct {
         const Self = @This();
 
-        i: *T,
+        i: *I,
+        comptime name: []const u8 = structInfo().name,
         comptime methods: StaticStringMap(Method) = methodInfo(),
 
-        const Fn = *const fn(*T, *BusType, *const Message, ?[]const u8) void;
+        const Fn = *const fn(*I, *BusType, *const Message, ?[]const u8) void;
         const Method = struct{
             name: []const u8,
             member: []const u8,
@@ -49,13 +51,14 @@ pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []con
             return_sig: ?[]const u8 = null,
         };
 
-        pub fn init(i: *T) Self {
+        pub fn init(i: *I) Self {
             return .{.i = i};
         }
 
         pub fn interface(self: *const Self) Interface(BusType) {
             return .{
                 .ptr = @ptrCast(@alignCast(self)),
+                .name = self.name,
                 .vtable = &.{
                     .call = call,
                 },
@@ -77,22 +80,37 @@ pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []con
             return m.@"fn"(i.i, bus, msg, m.return_sig);
         }
 
+        fn structInfo() struct { name: []const u8 } {
+            comptime {
+                const struct_info = @typeInfo(I).@"struct";
+                for (struct_info.fields) |field| {
+                    if (mem.eql(u8, field.name, "name")) {
+                        const name = field.defaultValue() orelse {
+                            @compileError(@typeName(I) ++ " must have it's `name` field set as a default value");
+                        };
+                        return .{ .name = name };
+                    }
+                }
+                @compileError(@typeName(I) ++ " must have a `name` field, used for the dbus interface name");
+            }
+        }
+
         fn methodInfo() StaticStringMap(Method) {
             comptime {
-                const declinfo = @typeInfo(T).@"struct".decls;
+                const declinfo = @typeInfo(I).@"struct".decls;
                 const KV = struct { []const u8, Method };
                 var kvs: [declinfo.len]KV = undefined;
 
                 var i: usize = 0;
                 for (declinfo) |decl| {
-                    const decl_info = @typeInfo(@TypeOf(@field(T, decl.name)));
+                    const decl_info = @typeInfo(@TypeOf(@field(I, decl.name)));
                     if (decl_info != .@"fn") continue;
 
                     const dbus_name = convertName(decl.name);
                     const m: Method = .{
                         .name = decl.name,
                         .member = dbus_name,
-                        .@"fn" = fnGeneric(Fn, decl.name, @field(T, decl.name)),
+                        .@"fn" = fnGeneric(Fn, decl.name, @field(I, decl.name)),
                         .return_sig = TypeSignature.signatureFromType(decl_info.@"fn".return_type.?),
                     };
 
@@ -133,14 +151,14 @@ pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []con
                 const ReturnType = fn_info.@"fn".return_type.?;
                 const return_info = @typeInfo(ReturnType);
 
-                fn f(t: *T, bus: *BusType, msg: *const Message, sig: ?[]const u8) void {
+                fn f(i: *I, bus: *BusType, msg: *const Message, sig: ?[]const u8) void {
                     comptime {
                         if (fn_info != .@"fn") @compileError("invalid function type");
-                        if (fn_params.len == 0 or fn_params[0].type != *T) {
+                        if (fn_params.len == 0 or fn_params[0].type != *I) {
                             @compileError(
                                 "invalid function, "
                                 ++ name ++ "(...)"
-                                ++ " must be method of " ++ @typeName(*T)
+                                ++ " must be method of " ++ @typeName(*I)
                             );
                         }
 
@@ -168,7 +186,7 @@ pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []con
                         assert(values.values.items.len == args.len);
                     }
 
-                    const ret: ReturnType = @call(.auto, F, .{ t } ++ args.*);
+                    const ret: ReturnType = @call(.auto, F, .{ i } ++ args.*);
 
                     var return_msg = Message.init(.{
                         .msg_type = .method_return,
@@ -204,7 +222,7 @@ pub fn BusInterface(comptime BusType: type, comptime T: anytype, bus_name: []con
                         },
                         .error_set => |eset| blk: {
                             if (eset) |_| {
-                                break :blk msg.appendError(allocator, bus_name, ret, null);
+                                break :blk msg.appendError(allocator, structInfo().name, ret, null);
                             // We catch here although I don't know how you could define a null error_set
                             } else @compileError("interface return error_set must not be null");
                         },
@@ -264,12 +282,12 @@ test "bind" {
     defer server.deinit();
 
     const Test = struct {
+        name: []const u8 = "net.dbuz.test.Test",
         fn funciton(_: *@This()) void {}
     };
 
     var t: Test = .{};
-    const bus_name = "net.dbuz.test";
-    try server.bind(bus_name ++ ".Test", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
+    try server.bind(BusInterface(ServerBus, Test).init(&t).interface());
     try server.start(.{});
 
     try std.testing.expect(server.state == .ready);
@@ -316,6 +334,7 @@ test "call" {
     const xev = @import("xev");
 
     const Test = struct {
+        name: []const u8 = "net.dbuz.test.Call",
         a: u32 = 0,
         pub fn set(t: *@This()) void {
             t.a = 42;
@@ -329,8 +348,7 @@ test "call" {
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
-    const bus_name = "net.dbuz.test";
-    try server.bind(bus_name ++ ".Call", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
+    try server.bind(BusInterface(ServerBus, Test).init(&t).interface());
     try server.start(.{});
     try std.testing.expect(server.state == .ready);
 
@@ -379,6 +397,7 @@ test "return types" {
     const xev = @import("xev");
 
     const Test = struct {
+        name: []const u8 = "net.dbuz.test.ReturnTypes",
         a: u32 = 0,
         pub fn uint32(_: *@This()) u32 {
             return 42;
@@ -408,8 +427,7 @@ test "return types" {
     const ServerBus = @TypeOf(server);
     defer server.deinit();
 
-    const bus_name = "net.dbuz.test";
-    try server.bind(bus_name ++ ".ReturnTypes", BusInterface(ServerBus, Test, bus_name).init(&t).interface());
+    try server.bind(BusInterface(ServerBus, Test).init(&t).interface());
     try server.start(.{});
     try std.testing.expect(server.state == .ready);
 
@@ -551,7 +569,7 @@ test "return types" {
     client.read_callback = struct {
         fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expectEqualStrings(
-                "net.dbuz.test.Error." ++ @errorName(error.Invalid),
+                "net.dbuz.test.ReturnTypes.Error." ++ @errorName(error.Invalid),
                 m.error_name.?
             ) catch unreachable;
         }
@@ -580,7 +598,7 @@ test "return types" {
         fn cb(_: *ClientBus, m: *Message) void {
             std.testing.expect(m.error_name != null) catch unreachable;
             std.testing.expectEqualStrings(
-                "net.dbuz.test.Error." ++ @errorName(error.Invalid),
+                "net.dbuz.test.ReturnTypes.Error." ++ @errorName(error.Invalid),
                 m.error_name.?
             ) catch unreachable;
         }
