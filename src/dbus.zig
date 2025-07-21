@@ -39,7 +39,6 @@ const BusOptions = struct {
     path: ?[]const u8 = null,
 };
 
-
 pub fn Dbus(comptime bus_type: BusType) type {
     return struct {
         type: BusType,
@@ -625,6 +624,38 @@ pub fn Dbus(comptime bus_type: BusType) type {
             try bus.run(.once); // read
             try bus.run(.no_wait); // rearm
             assert(bus.state == .ready);
+        }
+
+        pub fn readMsg(
+            bus: *Bus,
+        ) !*Message {
+            bus.read(null, struct {
+                fn cb(
+                    bus_: ?*Bus,
+                    _: *xev.Loop,
+                    _: *xev.Completion,
+                    _: Unix,
+                    b: xev.ReadBuffer,
+                    r: xev.ReadError!usize,
+                ) xev.CallbackAction {
+                    const n = r catch |e| {
+                        log.err("dbus hello read err: {any}", .{e});
+                        return .disarm;
+                    };
+
+                    bus_.?.readBufferMessages(b.slice[0..n]);
+                    return .disarm;
+                }
+            }.cb);
+            try bus.run(.once);
+            assert(bus.message_queue.size == 1);
+
+            while (bus.message_queue.pop()) |msg| {
+                if (msg.header.msg_type == .signal) continue;
+                return msg;
+            }
+
+            return error.NoMessageAvailable;
         }
 
         pub fn read(

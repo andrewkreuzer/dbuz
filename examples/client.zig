@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const log = std.log;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
@@ -20,15 +21,15 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var thread_pool = xev.ThreadPool.init(.{});
-    var dbus = try Dbus(.client).init(.{
+    var client = try Dbus(.client).init(.{
         .allocator = allocator,
         .thread_pool = &thread_pool
     });
-    defer dbus.deinit();
+    defer client.deinit();
 
-    dbus.read_callback = readCallback;
+    client.read_callback = readCallback;
 
-    try dbus.start(.{.start_read = true});
+    try client.start(.{});
 
     var life = Message.init(.{
         .msg_type = .method_call,
@@ -57,24 +58,38 @@ pub fn main() !void {
         .flags = 0x04,
     });
 
-    try dbus.writeMsg(&life);
-    defer life.deinit(allocator);
-    try dbus.run(.once);
+    {
+        try client.writeMsg(&life);
+        defer life.deinit(allocator);
+        try client.run(.once);
 
-    try dbus.writeMsg(&hack);
-    defer hack.deinit(allocator);
-    try dbus.run(.once);
+        var msg = try client.readMsg();
+        assert(msg.header.msg_type == .method_return);
+        msg.deinit(allocator);
+    }
 
-    try dbus.writeMsg(&empty);
-    defer empty.deinit(allocator);
-    try dbus.run(.once);
+    {
+        try client.writeMsg(&hack);
+        defer hack.deinit(allocator);
+        try client.run(.once);
 
-    std.Thread.sleep(100 * std.time.ns_per_ms); // Give some time for the messages to be processed
-    // read
-    try dbus.run(.once);
+        var msg = try client.readMsg();
+        assert(msg.header.msg_type == .method_return);
+        msg.deinit(allocator);
+    }
 
-    try dbus.shutdown();
-    try dbus.run(.until_done);
+    {
+        try client.writeMsg(&empty);
+        defer empty.deinit(allocator);
+        try client.run(.once);
+
+        var msg = try client.readMsg();
+        assert(msg.header.msg_type == .@"error");
+        msg.deinit(allocator);
+    }
+
+    try client.shutdown();
+    try client.run(.until_done);
 }
 
 // TODO: Implement the client side generation of interfaces
