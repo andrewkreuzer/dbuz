@@ -107,7 +107,7 @@ const Client = struct {
         defer dbus.deinit();
 
         std.debug.print("starting dbus client\n", .{});
-        try dbus.start(.{});
+        try dbus.start(.{.shutdown_async = false});
 
         var completion_pool = CompletionPool.init(allocator);
         defer completion_pool.deinit();
@@ -125,20 +125,30 @@ const Client = struct {
 
             try dbus.writeMsg(&msg);
             msg.deinit(allocator);
-            try dbus.run(.once);
         }
+        try dbus.run(.until_done);
 
         const t2 = try Instant.now();
-
+        var msg_read: u32 = 0;
         while (msg_read < MSG_COUNT) {
-            const c = try completion_pool.create();
-            dbus.read(c, readCallback);
-            try dbus.run(.once);
+            var msg = try dbus.readMsg();
+            switch (msg.header.msg_type) {
+                .signal => {},
+                .method_return => {},
+                .@"error" => {
+                    if (msg.signature) |sig| {
+                        log.err("error sig: {s}\n", .{sig});
+                    }
+                    log.err("error: {s}\n", .{msg.body_buf.?});
+                },
+                else => {
+                    log.err("unexpected msg: {s}\n", .{msg.body_buf.?});
+                },
+            }
+            msg_read += 1;
+            msg.deinit(allocator);
         }
         const t3 = try Instant.now();
-
-        try dbus.shutdown();
-        try dbus.run(.until_done);
 
         const write_time = @as(f64, @floatFromInt(t2.since(t1)));
         const read_time = @as(f64, @floatFromInt(t3.since(t2)));
@@ -151,63 +161,5 @@ const Client = struct {
         std.debug.print("client read msg/s {d:.2}\n", .{MSG_COUNT / (read_time / 1e9)});
         std.debug.print("client total time {d:.2} seconds\n", .{total_time / 1e9});
         std.debug.print("client total msg/s {d:.2}\n", .{MSG_COUNT / (total_time / 1e9)});
-    }
-
-    var msg_read: u32 = 0;
-
-    fn readCallback(
-        bus_: ?*Dbus(.client),
-        _: *xev.Loop,
-        c: *xev.Completion,
-        _: xev.TCP,
-        b: xev.ReadBuffer,
-        r: xev.ReadError!usize,
-    ) xev.CallbackAction {
-        const n = r catch |err| switch (err) {
-            error.EOF => return .disarm,
-            else => {
-                log.err("client read err: {any}", .{err});
-                return .disarm;
-            }
-        };
-
-        var fbs = std.io.fixedBufferStream(b.slice[0..n]);
-        while (true) {
-            var msg = Message.decode(bus_.?.allocator, fbs.reader()) catch |err| switch (err) {
-                error.EndOfStream => break,
-                error.InvalidFields => {
-                    log.err("buf slice: {s}\n", .{b.slice[0..n]});
-                    return .disarm;
-                },
-                else => {
-                    log.err("client read err: {any}", .{err});
-                    return .disarm;
-                },
-            };
-
-            switch (msg.header.msg_type) {
-                .method_return => {
-                    if (msg.sender) |sender| {
-                        if (!mem.eql(u8, sender, "org.freedesktop.DBus")) {
-                            // std.debug.print("method return: {d}\n", .{msg.body_buf.?});
-                        }
-                    }
-                },
-                .@"error" => {
-                    if (msg.signature) |sig| {
-                        log.err("error sig: {s}\n", .{sig});
-                    }
-                    log.err("error: {s}\n", .{msg.body_buf.?});
-                },
-                .signal => {},
-                else => {
-                    log.err("unexpected msg: {s}\n", .{msg.body_buf.?});
-                },
-            }
-            msg_read += 1;
-            msg.deinit(bus_.?.allocator);
-        }
-        bus_.?.completion_pool.destroy(c);
-        return .disarm;
     }
 };

@@ -70,8 +70,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
         completion_pool: CompletionPool,
 
         read_completion: xev.Completion = undefined,
-        write_queue: xev.WriteQueue = .{},
-        write_request_pool: WriteRequestPool,
+        write_completion_pool: CompletionPool,
 
         shutdown_async: xev.Async,
         shutdown_completion: xev.Completion = undefined,
@@ -129,10 +128,10 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 .loop = try xev.Loop.init(.{ .thread_pool = options.thread_pool }),
                 .thread_pool = options.thread_pool,
                 .completion_pool = CompletionPool.init(options.allocator),
-                .write_request_pool = WriteRequestPool.init(options.allocator),
                 .shutdown_async = try xev.Async.init(),
                 .allocator = options.allocator,
                 .write_buffer_pool = BufferPool.init(options.allocator),
+                .write_completion_pool = CompletionPool.init(options.allocator),
                 .message_queue = Queue(Message).init(MAX_QUEUE_SIZE),
                 .message_pool = MessagePool.init(options.allocator),
                 .state = .disconnected,
@@ -147,8 +146,8 @@ pub fn Dbus(comptime bus_type: BusType) type {
             bus.loop.deinit();
             bus.interfaces.deinit();
             bus.method_handles.deinit();
-            bus.write_request_pool.deinit();
             bus.write_buffer_pool.deinit();
+            bus.write_completion_pool.deinit();
             bus.completion_pool.deinit();
             bus.message_pool.deinit();
             if (bus.thread_pool) |pool| {
@@ -199,6 +198,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
         /// bus is ready. or to disable immediate reading for servers
         pub const StartOptions = struct {
             start_read: bool = if (bus_type == .server) true else false,
+            shutdown_async: bool = true,
         };
 
         /// Starts the bus connection
@@ -276,13 +276,15 @@ pub fn Dbus(comptime bus_type: BusType) type {
                     assert(bus.server_id != null);
                     assert(bus.name != null);
 
-                    bus.shutdown_async.wait(
-                        &bus.loop,
-                        &bus.shutdown_completion,
-                        Bus,
-                        bus,
-                        shutdownAsyncCallback
-                    );
+                    if (opts.shutdown_async) {
+                        bus.shutdown_async.wait(
+                            &bus.loop,
+                            &bus.shutdown_completion,
+                            Bus,
+                            bus,
+                            shutdownAsyncCallback
+                        );
+                    }
 
                     if (bus_type == .server) {
                         try bus.requestBoundNames();
@@ -629,33 +631,34 @@ pub fn Dbus(comptime bus_type: BusType) type {
         pub fn readMsg(
             bus: *Bus,
         ) !*Message {
-            bus.read(null, struct {
-                fn cb(
-                    bus_: ?*Bus,
-                    _: *xev.Loop,
-                    _: *xev.Completion,
-                    _: Unix,
-                    b: xev.ReadBuffer,
-                    r: xev.ReadError!usize,
-                ) xev.CallbackAction {
-                    const n = r catch |e| {
-                        log.err("dbus hello read err: {any}", .{e});
+            if (bus.message_queue.empty()) {
+                bus.read(null, struct {
+                    fn cb(
+                        bus_: ?*Bus,
+                        _: *xev.Loop,
+                        _: *xev.Completion,
+                        _: Unix,
+                        b: xev.ReadBuffer,
+                        r: xev.ReadError!usize,
+                    ) xev.CallbackAction {
+                        const n = r catch |e| {
+                            log.err("dbus read msg err: {any}", .{e});
+                            return .disarm;
+                        };
+                        bus_.?.readBufferMessages(b.slice[0..n]);
                         return .disarm;
-                    };
-
-                    bus_.?.readBufferMessages(b.slice[0..n]);
-                    return .disarm;
-                }
-            }.cb);
-            try bus.run(.once);
-            assert(bus.message_queue.size == 1);
-
-            while (bus.message_queue.pop()) |msg| {
-                if (msg.header.msg_type == .signal) continue;
-                return msg;
+                    }
+                }.cb);
+                try bus.run(.once);
             }
 
-            return error.NoMessageAvailable;
+            const msg: *Message = bus.message_queue.pop()
+                orelse return error.NoMessageAvailable;
+
+            // TODO: ignore signals for now
+            if (msg.header.msg_type == .signal) return error.NoMessageAvailable;
+
+            return msg;
         }
 
         pub fn read(
@@ -836,15 +839,13 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 return;
             }
 
-            const req = bus.write_request_pool.create() catch |e| {
-                log.err("dbus write request pool create err: {any}", .{e});
+            const c = bus.write_completion_pool.create() catch |e| {
+                log.err("dbus write completion pool create err: {any}", .{e});
                 return;
             };
-
-            bus.socket.?.queueWrite(
+            bus.socket.?.write(
                 &bus.loop,
-                &bus.write_queue,
-                req,
+                c,
                 .{ .slice = b },
                 Bus,
                 bus,
@@ -873,9 +874,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
 
             const buf = @as(*align(8) [MAX_BUFFER_SIZE]u8, @alignCast(@ptrCast(@constCast(b.slice))));
             bus.write_buffer_pool.destroy(buf);
-
-            const req = xev.WriteRequest.from(c);
-            bus.write_request_pool.destroy(req);
+            bus.write_completion_pool.destroy(c);
 
             return .disarm;
         }

@@ -46,7 +46,11 @@ pub fn Queue(comptime T: type) type {
             return next;
         }
 
-        pub fn empty (self: *Self) bool {
+        pub fn full(self: *Self) bool {
+            return self.size == self.capacity;
+        }
+
+        pub fn empty(self: *Self) bool {
             return self.size == 0;
         }
     };
