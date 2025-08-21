@@ -367,7 +367,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
             const msg = try std.fmt.bufPrint(
                 &buf,
                 "\x00AUTH EXTERNAL {x}\r\n",
-                .{uid_str}
+                .{std.fmt.fmtSliceHexLower(uid_str)}
             );
 
             bus.write(msg, onAuthWrite);
@@ -545,13 +545,13 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 var split = std.mem.splitBackwardsScalar(u8, name.*, '.');
                 const member = split.first();
                 if (member.len == 0) {
-                    log.err("dbus set method handle: no member name in {s}", .{name.*});
+                    log.err("dbus set method handle: no member name in {s}", .{name});
                     return error.InvalidArgument;
                 }
 
                 const iface = split.rest();
                 if (iface.len == 0) {
-                    log.err("dbus set method handle: no interface name in {s}", .{name.*});
+                    log.err("dbus set method handle: no interface name in {s}", .{name});
                     return error.InvalidArgument;
                 }
 

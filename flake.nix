@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url      = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url  = "github:numtide/flake-utils";
-    zig.url = "github:mitchellh/zig-overlay";
+    zig.url          = "github:mitchellh/zig-overlay";
   };
 
   outputs = { nixpkgs, flake-utils, ... } @ inputs:
@@ -12,7 +12,7 @@
       let
         overlays = [
           (final: prev: {
-            zig = inputs.zig.packages.${prev.system}."master";
+            zig = inputs.zig.packages.${prev.system}."0.14.1";
 
             dbuz = prev.callPackage ./nix/package.nix {};
           })
