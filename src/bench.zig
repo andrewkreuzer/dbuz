@@ -147,6 +147,7 @@ const Client = struct {
             }
             msg_read += 1;
             msg.deinit(allocator);
+            dbus.message_pool.destroy(msg);
         }
         const t3 = try Instant.now();
 

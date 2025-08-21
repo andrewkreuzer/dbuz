@@ -103,9 +103,11 @@ fn createExampleRun(
 
     const example_exe = b.addExecutable(.{
         .name = example_name,
-        .root_source_file = b.path(example_path),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(example_path),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     example_exe.root_module.addImport("libdbuz", lib);
     example_exe.root_module.addImport("xev", xev);

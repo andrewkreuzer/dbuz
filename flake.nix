@@ -12,7 +12,7 @@
       let
         overlays = [
           (final: prev: {
-            zig = inputs.zig.packages.${prev.system}."0.14.1";
+            zig = inputs.zig.packages.${prev.system}."master";
 
             dbuz = prev.callPackage ./nix/package.nix {};
           })
@@ -26,8 +26,9 @@
             zig
             lldb
             gdb
-            linuxKernel.packages.linux_libre.perf
+            # linuxKernel.packages.linux_libre.perf
             bpftrace
+            valgrind
           ];
         };
 

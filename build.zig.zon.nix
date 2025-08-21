@@ -4,10 +4,10 @@
 
 linkFarm "zig-packages" [
   {
-    name = "libxev-0.0.0-86vtc4b1EgCl0Kvo2Ixmjfl5PgAaJmvCXRIn_n89nCaR";
+    name = "libxev-0.0.0-86vtcx8dEwDfl6p4tGVxCygft8oOsggfba9JO-k28J2x";
     path = fetchzip {
-      url = "https://github.com/mitchellh/libxev/archive/5647630d7bff969414a0edc24c03c30aff34b101.tar.gz";
-      hash = "sha256-nlJzFS/4BdKUmBwacdvEmFRn+E8YWnD6R/c2OcStd7w=";
+      url = "https://github.com/mitchellh/libxev/archive/9f785d202ddccf7a625e799250579253977978b6.tar.gz";
+      hash = "sha256-9dD7TIW5n3rHIPCdpxiVEdVqXs/cslR+VP8XN9H9Efc=";
     };
   }
 ]

@@ -367,7 +367,7 @@ pub fn Dbus(comptime bus_type: BusType) type {
             const msg = try std.fmt.bufPrint(
                 &buf,
                 "\x00AUTH EXTERNAL {x}\r\n",
-                .{std.fmt.fmtSliceHexLower(uid_str)}
+                .{uid_str}
             );
 
             bus.write(msg, onAuthWrite);
@@ -545,13 +545,13 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 var split = std.mem.splitBackwardsScalar(u8, name.*, '.');
                 const member = split.first();
                 if (member.len == 0) {
-                    log.err("dbus set method handle: no member name in {s}", .{name});
+                    log.err("dbus set method handle: no member name in {s}", .{name.*});
                     return error.InvalidArgument;
                 }
 
                 const iface = split.rest();
                 if (iface.len == 0) {
-                    log.err("dbus set method handle: no interface name in {s}", .{name});
+                    log.err("dbus set method handle: no interface name in {s}", .{name.*});
                     return error.InvalidArgument;
                 }
 
@@ -577,55 +577,23 @@ pub fn Dbus(comptime bus_type: BusType) type {
             try req_msg.appendNumber(bus.allocator, @as(u32, 1));
 
             try bus.writeMsg(&req_msg);
-            bus.read(null, struct {
-                fn cb(
-                    bus_: ?*Bus,
-                    _: *xev.Loop,
-                    _: *xev.Completion,
-                    _: Unix,
-                    b: xev.ReadBuffer,
-                    r: xev.ReadError!usize,
-                ) xev.CallbackAction {
-                    const n = r catch |e| {
-                        log.err("dbus hello read err: {any}", .{e});
-                        return .disarm;
-                    };
+            try bus.run(.once);
 
-                    bus_.?.readBufferMessages(b.slice[0..n]);
-                    while (bus_.?.message_queue.pop()) |msg| {
-                        defer bus_.?.message_pool.destroy(msg);
-                        defer msg.deinit(bus_.?.allocator);
-
-                        if (msg.header.msg_type == .signal) continue;
-                        switch (msg.values.?.get(0).?.inner.uint32) {
-                            1 => {
-                                log.debug("dbus request name read: name acquired", .{});
-                                return .disarm;
-                            },
-                            2, => {
-                                log.debug("dbus request name read: name already exists, added to queue", .{});
-                                return .disarm;
-                            },
-                            3, => {
-                                log.debug("dbus request name read: name already exists, cannot aquire", .{});
-                                return .disarm;
-                            },
-                            4, => {
-                                log.debug("dbus request name read: dbus is already owner of name", .{});
-                                return .disarm;
-                            },
-                            // There are only 4 possible values
-                            // but zig requires handling all cases
-                            else => {}
-                        }
-                    }
-                    return .rearm;
-                }
-            }.cb);
-            try bus.run(.once); // write
-            try bus.run(.once); // read
-            try bus.run(.no_wait); // rearm
-            assert(bus.state == .ready);
+            // read messages until we get one that's not a signal
+            var msg = blk: {
+                while (true) break :blk bus.readMsg() catch continue;
+            };
+            defer bus.message_pool.destroy(msg);
+            defer msg.deinit(bus.allocator);
+            switch (msg.values.?.get(0).?.inner.uint32) {
+                1 => log.debug("dbus request name read: name acquired", .{}),
+                2, => log.debug("dbus request name read: name already exists, added to queue", .{}),
+                3, => log.debug("dbus request name read: name already exists, cannot aquire", .{}),
+                4, => log.debug("dbus request name read: dbus is already owner of name", .{}),
+                // There are only 4 possible values
+                // but zig requires handling all cases
+                else => {}
+            }
         }
 
         pub fn readMsg(
@@ -656,7 +624,11 @@ pub fn Dbus(comptime bus_type: BusType) type {
                 orelse return error.NoMessageAvailable;
 
             // TODO: ignore signals for now
-            if (msg.header.msg_type == .signal) return error.NoMessageAvailable;
+            if (msg.header.msg_type == .signal) {
+                defer bus.message_pool.destroy(msg);
+                defer msg.deinit(bus.allocator);
+                return error.ReadSignal;
+            }
 
             return msg;
         }

@@ -127,10 +127,9 @@ pub fn BusInterface(comptime BusType: type, comptime I: anytype) type {
         fn ParamTuple(params: []const Type.Fn.Param) type {
             comptime {
                 var param_list: [params.len - 1]type = undefined;
+                // avoid the first parameter as it should be the struct ptr
                 for (params[1..], 0..) |param, i| {
                     if (param.type == null) @compileError("invalid parameter type");
-                    const param_info = @typeInfo(param.type.?);
-                    _ = param_info;
                     param_list[i] = param.type.?;
                 }
                 return Tuple(&param_list);
